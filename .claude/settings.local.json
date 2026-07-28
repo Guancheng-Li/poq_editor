@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(iconv -f GBK -t UTF-8 使用说明.txt)",
+      "Bash(iconv -f GB18030 -t UTF-8 使用说明.txt)",
+      "Bash(iconv -f GBK -t UTF-8 EquMod.ini)",
+      "Bash(brew list *)",
+      "Bash(python3 -c \"import pefile\")",
+      "Bash(xxd poq_hack.exe)",
+      "Bash(pip3 install *)",
+      "Bash(python3 -c \"import pefile; print\\('pefile OK', pefile.__version__\\)\")",
+      "Bash(cat)",
+      "Bash(python3 /tmp/version_manifest.py)",
+      "Bash(python3 /tmp/ep.py)",
+      "Bash(python3 -c \"import unicorn; print\\('unicorn OK', unicorn.__version__\\)\")",
+      "Bash(python3 /tmp/dump_handler.py)",
+      "Bash(python3 /tmp/imports_detail.py)",
+      "Bash(timeout 120 python3 /tmp/unpack.py)",
+      "Bash(python3 /tmp/unpack.py)",
+      "Bash(UC_IGNORE_REG_BREAK=1 python3 /tmp/unpack.py)",
+      "Bash(grep -rn \"GDTR\\\\|_fields_\\\\s*=\\\\s*\\\\['base'\" /Users/guancheng/Library/Python/3.9/lib/python/site-packages/unicorn/unicorn_py3/arch/ 2>/dev/null | head -30; echo \"==== search x86 mmr ====\"; find /Users/guancheng/Library/Python/3.9/lib/python/site-packages/unicorn -name \"*.py\" | xargs grep -ln \"x86_mmr\\\\|X86_REG_GDTR\" 2>/dev/null | head)",
+      "Read(//Users/guancheng/Library/Python/3.9/lib/python/site-packages/unicorn/unicorn_py3/arch/**)",
+      "Read(//Users/guancheng/Library/Python/3.9/lib/python/site-packages/unicorn/**)",
+      "Bash(UC_IGNORE_REG_BREAK=1 python3 -u /tmp/unpack.py)",
+      "Bash(UC_IGNORE_REG_BREAK=1 python3 -u /tmp/unpack2.py)",
+      "Bash(UC_IGNORE_REG_BREAK=1 python3 -u /tmp/unpack3.py)",
+      "Bash(python3 -c \"import capstone; print\\('capstone', capstone.__version__\\)\")",
+      "Bash(python3 /tmp/strings.py)",
+      "Bash(python3 /tmp/gbk_strings.py)",
+      "Bash(python3 /tmp/thunk_dump.py)"
+    ]
+  }
+}

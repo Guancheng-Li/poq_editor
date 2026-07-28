@@ -1,0 +1,31 @@
+{
+  "AnchorAddress": "0x901FF0",
+  "ItemBaseAdjust": -240,
+  "ProcessAccess": "0x1F0FFF",
+  "TemplateIni": "EquMod.ini",
+  "BasicFields": [
+    { "Label": "字段_0x00", "Offset": 0 },
+    { "Label": "字段_0x04", "Offset": 4 },
+    { "Label": "字段_0x08", "Offset": 8 },
+    { "Label": "字段_0x0C", "Offset": 12 },
+    { "Label": "字段_0x10", "Offset": 16 },
+    { "Label": "字段_0x14", "Offset": 20 },
+    { "Label": "字段_0x20", "Offset": 32 },
+    { "Label": "字段_0xA0", "Offset": 160 },
+    { "Label": "字段_0xCC", "Offset": 204 },
+    { "Label": "字段_0xF8", "Offset": 248 },
+    { "Label": "字段_0x110", "Offset": 272 },
+    { "Label": "字段_0x268", "Offset": 616 },
+    { "Label": "字段_0x404", "Offset": 1028 }
+  ],
+  "PropertyList": {
+    "BaseOffsetFromItem": 1028,
+    "Count": 46,
+    "Stride": 36,
+    "IndexOffset": 0,
+    "NumOffset": 4,
+    "ColorOffset": 20,
+    "PrecentOffset": 32,
+    "ScanArray": true
+  }
+}
