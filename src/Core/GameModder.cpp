@@ -36,6 +36,21 @@ void AppendLe32(std::vector<unsigned char>& v, uint32_t x) {
     v.push_back(static_cast<unsigned char>((x >> 24) & 0xFF));
 }
 
+// cmp dword [esi+off], imm(imm8 用 83 BE,否则 81 BE)——item_type 捕获条件用。
+void AppendCmpEsiImm(std::vector<unsigned char>& v, uint32_t off, int32_t imm) {
+    if (imm >= -128 && imm <= 127) {
+        v.push_back(0x83);
+        v.push_back(0xBE);
+        AppendLe32(v, off);
+        v.push_back(static_cast<unsigned char>(imm & 0xFF));
+    } else {
+        v.push_back(0x81);
+        v.push_back(0xBE);
+        AppendLe32(v, off);
+        AppendLe32(v, static_cast<uint32_t>(imm));
+    }
+}
+
 // 把一个 Unicode 码点编码为 GBK(CP936)字节。失败时用 "?" 替代(近似 Python 的 errors="replace")。
 std::string GbkEncodeOne(uint32_t cp) {
     wchar_t wbuf[2];
@@ -149,7 +164,14 @@ void GameModder::Inject() {
     uintptr_t cave_addr = alloc_base_ + 4;
     mem_.WriteUInt32(cur_item_addr_, 0);
     uintptr_t return_addr = hook_addr_ + 5;
-    auto cave = BuildCave(cur_item_addr_, cave_addr, return_addr, disp);
+    // 捕获条件:未配置 capture 时按 weight 类型,用 hook.weight_offset/weight_max 兜底
+    const HookCfg& hk = config_.Current().hook;
+    CaptureCfg cap = hk.capture ? *hk.capture : CaptureCfg{};
+    if (cap.type == "weight") {
+        cap.offset = hk.capture ? hk.capture->offset : hk.weight_offset;
+        cap.max = hk.capture ? hk.capture->max : hk.weight_max;
+    }
+    auto cave = BuildCave(cur_item_addr_, cave_addr, return_addr, disp, cap);
     mem_.Write(cave_addr, cave);
     uint32_t jmp_rel = static_cast<uint32_t>(cave_addr - return_addr);
     std::vector<unsigned char> jmp;
@@ -158,31 +180,78 @@ void GameModder::Inject() {
     mem_.Write(hook_addr_, jmp);
 }
 
-std::vector<unsigned char> GameModder::BuildCave(uintptr_t cur_item_addr, uintptr_t cave_addr,
-                                                 uintptr_t return_addr, uint8_t disp) {
-    // 语义(与 CT 等价):
+std::map<std::string, GameModder::CaptureBuilder> GameModder::CaptureBuilders() {
+    // 捕获条件注册表:新增条件类型只需在此注册 + 配置 capture.type,无 if-else。
+    static const std::map<std::string, CaptureBuilder> kBuilders = {
+        {"weight", &GameModder::BuildCapWeight},
+        {"item_type", &GameModder::BuildCapItemType},
+    };
+    return kBuilders;
+}
+
+std::vector<unsigned char> GameModder::BuildCapWeight(uintptr_t cur_item_addr,
+                                                      const CaptureCfg& cap) {
+    // 捕获条件 weight(v1.30 默认):重量条件,占用的寄存器入栈保护。
     //   push ecx
-    //   mov ecx,[esi+0xF8]        ; 重量
-    //   cmp ecx, 1000
+    //   mov ecx,[esi+offset]      ; 重量
+    //   cmp ecx, max
     //   ja nocap
     //   mov [cur_item], esi       ; 捕获物品指针
     // nocap:
     //   pop ecx
-    //   mov eax,[esi+eax*4+disp]  ; 原指令(disp 用实际字节,如 1E/30)
-    //   pop esi                   ; 原指令
-    //   jmp returnhere
     std::vector<unsigned char> cave;
     cave.push_back(0x51);                                       // push ecx
-    cave.push_back(0x8B); cave.push_back(0x8E);                 // mov ecx,[esi+0xF8]
-    cave.push_back(0xF8); cave.push_back(0x00);
-    cave.push_back(0x00); cave.push_back(0x00);
-    cave.push_back(0x81); cave.push_back(0xF9);                 // cmp ecx, 0x3E8 (1000)
-    cave.push_back(0xE8); cave.push_back(0x03);
-    cave.push_back(0x00); cave.push_back(0x00);
+    cave.push_back(0x8B); cave.push_back(0x8E);                 // mov ecx,[esi+offset]
+    AppendLe32(cave, cap.offset);
+    cave.push_back(0x81); cave.push_back(0xF9);                 // cmp ecx, max
+    AppendLe32(cave, cap.max);
     cave.push_back(0x77); cave.push_back(0x06);                 // ja +6(跳过 mov [cur_item],esi)
     cave.push_back(0x89); cave.push_back(0x35);                 // mov [cur_item],esi
     AppendLe32(cave, static_cast<uint32_t>(cur_item_addr));
     cave.push_back(0x59);                                       // pop ecx (nocap)
+    return cave;
+}
+
+std::vector<unsigned char> GameModder::BuildCapItemType(uintptr_t cur_item_addr,
+                                                        const CaptureCfg& cap) {
+    // 捕获条件 item_type(steam/web.ct):类型条件,不占寄存器。
+    //   cmp [esi+mark_offset], mark_value
+    //   jne code
+    //   cmp [esi+type_offset], type_min
+    //   jb code
+    //   cmp [esi+type_offset], type_max
+    //   ja code
+    //   mov [cur_item], esi
+    // code:
+    std::vector<unsigned char> conds;
+    AppendCmpEsiImm(conds, cap.mark_offset, static_cast<int32_t>(cap.mark_value));
+    size_t j1 = conds.size();
+    conds.push_back(0x75); conds.push_back(0x00);               // jne code
+    AppendCmpEsiImm(conds, cap.type_offset, static_cast<int32_t>(cap.type_min));
+    size_t j2 = conds.size();
+    conds.push_back(0x72); conds.push_back(0x00);               // jb code
+    AppendCmpEsiImm(conds, cap.type_offset, static_cast<int32_t>(cap.type_max));
+    size_t j3 = conds.size();
+    conds.push_back(0x77); conds.push_back(0x00);               // ja code
+    conds.push_back(0x89); conds.push_back(0x35);               // mov [cur_item],esi
+    AppendLe32(conds, static_cast<uint32_t>(cur_item_addr));
+    size_t code_pos = conds.size();
+    // 回填三条条件跳转的目标(code 标签)
+    conds[j1 + 1] = static_cast<unsigned char>((code_pos - (j1 + 2)) & 0xFF);
+    conds[j2 + 1] = static_cast<unsigned char>((code_pos - (j2 + 2)) & 0xFF);
+    conds[j3 + 1] = static_cast<unsigned char>((code_pos - (j3 + 2)) & 0xFF);
+    return conds;
+}
+
+std::vector<unsigned char> GameModder::BuildCave(uintptr_t cur_item_addr, uintptr_t cave_addr,
+                                                 uintptr_t return_addr, uint8_t disp,
+                                                 const CaptureCfg& capture) {
+    // "判断 + 捕获"段由捕获条件注册表按 capture.type 生成(无 if-else);
+    // 这里只负责拼接原指令段(与 CT 等价)和 jmp 回跳。
+    auto it = CaptureBuilders().find(capture.type);
+    if (it == CaptureBuilders().end())
+        throw std::runtime_error("未知捕获条件类型: " + capture.type + "(配置 hook.capture.type)");
+    std::vector<unsigned char> cave = it->second(cur_item_addr, capture);
     cave.push_back(0x8B); cave.push_back(0x44);                 // mov eax,[esi+eax*4+disp]
     cave.push_back(0x86); cave.push_back(disp & 0xFF);
     cave.push_back(0x5E);                                       // pop esi
@@ -223,6 +292,8 @@ void GameModder::ResetState() {
     hook_addr_ = 0;
     cur_item_addr_ = 0;
     alloc_base_ = 0;
+    pool_base_ = 0;
+    pool_size_ = 0;
     orig_bytes_.clear();
 }
 
@@ -248,6 +319,11 @@ void GameModder::Close() {
             if (alloc_base_) mem_.Free(alloc_base_);
         } catch (...) {
         }
+    }
+    // 释放动态节点池(steam/v1.30 用,需在句柄关闭前)
+    try {
+        if (pool_base_) mem_.Free(pool_base_);
+    } catch (...) {
     }
     ResetState();
     mem_.Close();
@@ -533,10 +609,10 @@ std::pair<int, int> GameModder::WriteAttributes(uintptr_t item_base,
         } else {
             mem_.WriteUInt32(item_base + cfg.head_offset, 0);
         }
-        // 被移除的静态池节点清零(脱离链表,可被后续新增复用);堆节点不动
+        // 被移除的池节点清零(脱离链表,可被后续新增复用);堆节点不动
         for (int i = m; i < k; ++i) {
             uintptr_t addr = existing[static_cast<size_t>(i)];
-            if (addr >= cfg.static_base && addr < cfg.static_base + cfg.static_size) {
+            if (IsPoolNode(addr)) {
                 try {
                     mem_.Write(addr, std::vector<unsigned char>(cfg.static_slot, 0));
                 } catch (...) {
@@ -587,17 +663,54 @@ std::pair<int, int> GameModder::WriteAttributes(uintptr_t item_base,
     return {written + added, need - added};
 }
 
+std::pair<uintptr_t, uint32_t> GameModder::PoolCfg() {
+    // 返回当前节点池的 (base, size),按 pool_type 配置分发(无 if-else):
+    // - "static":固定静态区(static_base/static_size)。
+    // - "dynamic":VirtualAllocEx 动态分配(steam/v1.30,对齐 web.ct)——游戏不认识
+    //   这块内存、不会 free,地址每次运行时分配总是有效;分配失败返回 (0,0),调用方跳过新增。
+    const AttrListCfg& cfg = config_.Current().attr_list;
+    if (cfg.pool_type == "dynamic") {
+        if (!pool_base_ && mem_.IsOpen()) {
+            // 动态池:保证 ≥ 30 槽
+            uint32_t slots = std::max<uint32_t>(30, cfg.static_size / cfg.static_slot);
+            uint32_t size = slots * cfg.static_slot;
+            uintptr_t base = 0;
+            try {
+                base = mem_.Alloc(size);
+                mem_.Write(base, std::vector<unsigned char>(size, 0));
+            } catch (...) {
+                base = 0;
+            }
+            if (base) {
+                pool_base_ = base;
+                pool_size_ = size;
+            }
+        }
+        return {pool_base_, pool_size_};
+    }
+    return {cfg.static_base, cfg.static_size};
+}
+
+bool GameModder::IsPoolNode(uintptr_t addr) {
+    auto pc = PoolCfg();
+    return pc.first && addr >= pc.first && addr < pc.first + pc.second;
+}
+
 uintptr_t GameModder::FindFreeStaticNode(const std::set<uintptr_t>& used) {
-    // 在静态节点池里找一块全 0 的 static_slot 槽(最高地址优先,对齐原版修改器的槽网格)。
-    // 槽网格对齐 = static_base % static_slot,保证我们用的槽与原版修改器后续分配的槽不错位冲突。
+    // 在节点池里找一块全 0 的 static_slot 槽(最高地址优先,对齐槽网格)。
+    // 池由 PoolCfg() 决定(固定静态池 / 动态池);槽网格对齐 = base % static_slot,
+    // 保证我们用的槽与原版修改器后续分配的槽不错位冲突。全 0 要求自然避开已用节点/
+    // 静态数据表/锚点等非零区域,绝不写非零字节。找不到返回 0。
     const AttrListCfg& cfg = config_.Current().attr_list;
     uint32_t size = cfg.static_slot;
-    uint32_t align = cfg.static_base % size;
-    uint32_t end = cfg.static_base + cfg.static_size;
+    auto pc = PoolCfg();
+    if (!pc.first) return 0;
+    uintptr_t pool_end = pc.first + pc.second;
+    uint32_t align = static_cast<uint32_t>(pc.first % size);
     // 从池顶向下扫,且候选地址与槽网格对齐
-    uint32_t addr = end - size;
+    uintptr_t addr = pool_end - size;
     addr -= (addr - align) % size;
-    while (addr >= cfg.static_base) {
+    while (addr >= pc.first) {
         bool ok = true;
         for (uintptr_t u : used) {
             if (addr < u + size && u < addr + size) {

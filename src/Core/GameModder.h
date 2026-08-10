@@ -103,8 +103,23 @@ private:
     static bool IsHookOriginal(const std::vector<unsigned char>& orig);
     void Inject();
     static std::vector<unsigned char> BuildCave(uintptr_t cur_item_addr, uintptr_t cave_addr,
-                                                uintptr_t return_addr, uint8_t disp);
+                                                uintptr_t return_addr, uint8_t disp,
+                                                const CaptureCfg& capture);
     uintptr_t FindCurItemSlot(uintptr_t hook_addr);
+
+    // 捕获条件注册表:capture.type -> 生成"判断 + 捕获"段字节函数
+    // (新增条件类型只需在此注册 + 配置 capture.type,无 if-else)。
+    using CaptureBuilder = std::vector<unsigned char> (*)(uintptr_t cur_item_addr,
+                                                          const CaptureCfg& cap);
+    static std::map<std::string, CaptureBuilder> CaptureBuilders();
+    static std::vector<unsigned char> BuildCapWeight(uintptr_t cur_item_addr,
+                                                     const CaptureCfg& cap);
+    static std::vector<unsigned char> BuildCapItemType(uintptr_t cur_item_addr,
+                                                       const CaptureCfg& cap);
+
+    // 节点池:按 attr_list.pool_type 分发("static" 固定区 / "dynamic" VirtualAllocEx)
+    std::pair<uintptr_t, uint32_t> PoolCfg();
+    bool IsPoolNode(uintptr_t addr);
 
     std::string ReadStringField(uintptr_t item_base, const BasicFieldCfg& f);
     void WriteStringField(uintptr_t item_base, const BasicFieldCfg& f, const std::string& text);
@@ -123,6 +138,8 @@ private:
     uintptr_t hook_addr_ = 0;
     uintptr_t cur_item_addr_ = 0;  // cur_item 槽地址
     uintptr_t alloc_base_ = 0;     // 自注入分配的基址(用于释放)
+    uintptr_t pool_base_ = 0;      // 动态节点池基址(pool_type=dynamic 时)
+    uint32_t pool_size_ = 0;       // 动态节点池大小
     std::vector<unsigned char> orig_bytes_;  // 自注入前 hook 处原始 5 字节(用于还原)
 };
 

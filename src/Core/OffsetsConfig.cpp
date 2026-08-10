@@ -143,8 +143,9 @@ std::map<int, std::string> OffsetsConfig::ParseTypeMapping(const std::string& te
 
 ModeCfg OffsetsConfig::DefaultMode() {
     ModeCfg m;
-    m.name = "默认";
+    m.name = "v1.30";
     m.item_base_adjust = 0;
+    m.hook.capture = CaptureCfg{};  // weight:重量 <= 1000 才捕获
 
     auto F = [](const char* label, uint32_t offset, const char* type) {
         BasicFieldCfg f;
@@ -249,12 +250,36 @@ ModeCfg OffsetsConfig::DefaultMode() {
     bf.hint = "仅类型为 13(箭)/14(矢) 时生效";
     m.basic_fields.push_back(bf);
 
+    // v1.30 也走动态节点池(VirtualAllocEx,地址每次运行时总是有效)。
+    m.attr_list.pool_type = "dynamic";
+
+    return m;
+}
+
+ModeCfg OffsetsConfig::SteamMode() {
+    ModeCfg m;
+    m.name = "Steam版";
+    m.hook.module = "EasyRPG.dll";
+    m.hook.offset = 141054;  // 0x226FE
+    m.hook.aob = "8B 44 86 30 5E 5D C2 04 00 83 C8 FF 5E 5D C2 04 00 CC";
+    CaptureCfg cap;  // item_type:标记==101 且类型 ∈ [7,34] 才捕获(对齐 web.ct)
+    cap.type = "item_type";
+    cap.mark_offset = 0x1C;
+    cap.mark_value = 101;
+    cap.type_offset = 0xFC;
+    cap.type_min = 7;
+    cap.type_max = 34;
+    m.hook.capture = cap;
+    // basic_fields 与 v1.30 相同(steam 偏移表同构)。
+    m.basic_fields = DefaultMode().basic_fields;
+    m.attr_list.pool_type = "dynamic";
     return m;
 }
 
 OffsetsConfig OffsetsConfig::Default() {
     OffsetsConfig cfg;
     cfg.modes["mode0"] = DefaultMode();
+    cfg.modes["mode1"] = SteamMode();
     cfg.current_mode = "mode0";
     return cfg;
 }

@@ -295,6 +295,7 @@ struct App {
 
     // ---- 状态 / 静态选项 ----
     bool hidden = true;  // F12 前隐藏调试 tab
+    bool show_welcome = true;  // 启动免责声明弹窗(每次打开应用显示一次)
     std::string status;
     std::vector<uint32_t> attr_ids, color_ids, percent_ids;
 
@@ -319,25 +320,15 @@ struct App {
         }
     }
 
-    // 刷新进程列表,自动选中 POQ.EXE
+    // 刷新进程列表,只列 POQ.EXE(自动选中第一个,避免全系统进程干扰选择)
     void RefreshProcesses() {
-        processes = ProcessMemory::EnumerateProcesses();
-        proc_selected = -1;
-        std::optional<unsigned int> poq;
-        for (const auto& p : processes)
-            if (ToLower(p.name) == "poq.exe") poq = p.pid;
-        if (poq) {
-            for (size_t i = 0; i < processes.size(); ++i)
-                if (processes[i].pid == *poq) {
-                    proc_selected = static_cast<int>(i);
-                    break;
-                }
-        }
-        std::string msg = "已列出 " + std::to_string(processes.size()) + " 个进程。";
-        if (poq)
-            msg += "已自动选中 POQ.EXE。";
-        else
-            msg += "未找到 POQ.EXE,请手动选择或启动游戏。";
+        processes.clear();
+        for (const auto& p : ProcessMemory::EnumerateProcesses())
+            if (ToLower(p.name) == "poq.exe") processes.push_back(p);
+        proc_selected = processes.empty() ? -1 : 0;
+        std::string msg = "已列出 " + std::to_string(processes.size()) + " 个 POQ.EXE 进程。";
+        if (processes.empty())
+            msg += "未找到 POQ.EXE,请先启动游戏后点\"刷新进程\"。";
         status = msg;
     }
 
@@ -942,6 +933,50 @@ void RenderCfgTab(App& app) {
         "需要固定偏移时改代码重新编译。");
 }
 
+void RenderWelcomeDialog(App& app) {
+    // 每次启动显示的免责声明弹窗:居中,底部中间"确认"关闭。
+    if (!app.show_welcome) return;
+    if (!ImGui::IsPopupOpen("关于")) ImGui::OpenPopup("关于");
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(440, 240), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("关于", nullptr,
+                               ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoCollapse)) {
+        const float win_w = ImGui::GetWindowSize().x;
+        const float win_h = ImGui::GetWindowSize().y;
+        const char* kLines[] = {
+            "本软件仅供娱乐研究，严禁售卖牟利，一切后果与作者无关。",
+            "唯一发布途径：百度贴吧",
+            "作者：潜移默化的影响",
+            "鸣谢：B站up口花生口",
+        };
+        // 文本区(四行)居中显示,垂直大致居中
+        float y = win_h * 0.16f;
+        const float line_h = ImGui::GetTextLineHeightWithSpacing();
+        for (const char* line : kLines) {
+            float tw = ImGui::CalcTextSize(line).x;
+            ImGui::SetCursorPos(ImVec2((win_w - tw) * 0.5f, y));
+            ImGui::TextUnformatted(line);
+            y += line_h;
+        }
+        // 底部中间"确认"按钮
+        const float btn_w = 120.0f;
+        const float btn_h = 30.0f;
+        ImGui::SetCursorPos(ImVec2((win_w - btn_w) * 0.5f, win_h - btn_h - 20.0f));
+        if (ImGui::Button("确认", ImVec2(btn_w, btn_h))) {
+            app.show_welcome = false;
+            ImGui::CloseCurrentPopup();
+        }
+        // Esc 也可关闭(且不再弹)
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            app.show_welcome = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
 void RenderTopBar(App& app) {
     const ImGuiStyle& style = ImGui::GetStyle();
     const float spacing = style.ItemSpacing.x;
@@ -954,22 +989,54 @@ void RenderTopBar(App& app) {
     const float init_w = ImGui::CalcTextSize(kInit).x + frame_pad_x;
     const float buttons_w = refresh_w + spacing + init_w;
 
-    // 进程下拉
+    // 游戏版本(mode)下拉项:显示 mode 名(v1.30 / Steam版)
+    std::vector<std::string> ver_labels;
+    for (const auto& kv : app.cfg.modes) ver_labels.push_back(kv.second.name);
+    std::vector<const char*> ver_items;
+    for (const auto& s : ver_labels) ver_items.push_back(s.c_str());
+
+    // 进程下拉(POQ.EXE)
     std::vector<std::string> proc_labels;
     for (const auto& p : app.processes) proc_labels.push_back(p.Display());
     std::vector<const char*> proc_items;
     for (const auto& s : proc_labels) proc_items.push_back(s.c_str());
 
-    // "选择进程:" 占固定宽度,下拉框占满剩余,按钮贴右缘
-    const char* kLabel = "选择进程:";
-    const float label_w = ImGui::CalcTextSize(kLabel).x;
+    // 版本标签固定 + 版本下拉固定宽;进程下拉占满剩余;按钮贴右缘
+    const char* kVerLabel = "游戏版本:";
+    const char* kProcLabel = "选择进程:";
+    const float ver_label_w = ImGui::CalcTextSize(kVerLabel).x;
+    const float proc_label_w = ImGui::CalcTextSize(kProcLabel).x;
+    const float ver_w = 150.0f;
     const float row_w = ImGui::GetContentRegionAvail().x;
-    float combo_w = row_w - label_w - buttons_w - spacing * 3.0f;
-    if (combo_w < 60.0f) combo_w = 60.0f;  // 窗口过窄时给下拉框保底
+    float proc_w = row_w - ver_label_w - ver_w - proc_label_w - buttons_w - spacing * 5.0f;
+    if (proc_w < 80.0f) proc_w = 80.0f;  // 窗口过窄时给进程下拉保底
 
-    ImGui::TextUnformatted(kLabel);
+    // 游戏版本切换 = 切换 offsets 模式:先还原旧模式注入,再切换并提示重新初始化
+    ImGui::TextUnformatted(kVerLabel);
     ImGui::SameLine(0, spacing);
-    ImGui::SetNextItemWidth(combo_w);
+    ImGui::SetNextItemWidth(ver_w);
+    int ver_sel = app.mode_selected;
+    if (ImGui::Combo("##ver", &ver_sel, ver_items.data(), static_cast<int>(ver_items.size()))) {
+        if (ver_sel != app.mode_selected && ver_sel >= 0 &&
+            static_cast<size_t>(ver_sel) < app.mode_ids.size()) {
+            const std::string& mid = app.mode_ids[static_cast<size_t>(ver_sel)];
+            if (app.modder.Mem().IsOpen()) {
+                try {
+                    app.modder.Close();  // 还原旧模式注入,避免残留 hook
+                } catch (...) {
+                }
+            }
+            app.cfg.SetCurrent(mid);
+            app.modder.Config() = app.cfg;
+            app.ReloadCfgBuffers();
+            app.RefreshProcesses();
+            app.SetStatus("已切换游戏版本:" + app.cfg.Current().name + "。请重新初始化。");
+        }
+    }
+    ImGui::SameLine(0, spacing);
+    ImGui::TextUnformatted(kProcLabel);
+    ImGui::SameLine(0, spacing);
+    ImGui::SetNextItemWidth(proc_w);
     int sel = app.proc_selected;
     if (ImGui::Combo("##proc", &sel, proc_items.data(), static_cast<int>(proc_items.size()))) {
         app.proc_selected = sel;
@@ -1267,6 +1334,7 @@ int RunApp(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         if (ImGui::IsKeyPressed(ImGuiKey_F12)) app.hidden = !app.hidden;
 
         RenderMainWindow(app);
+        RenderWelcomeDialog(app);
 
         // 渲染
         ImGui::Render();

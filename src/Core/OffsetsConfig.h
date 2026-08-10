@@ -8,13 +8,34 @@
 
 namespace poq {
 
+/// 捕获条件配置(对应 Python 的 hook.capture)。
+///
+/// 决定注入 cave 中"判断 + 捕获"段如何生成,由 GameModder 按 type 注册表分发
+/// (无 if-else):
+/// - "weight"(v1.30):`[esi+offset] <= max`(重量条件)。
+/// - "item_type"(steam/web.ct):`[esi+mark_offset]==mark_value` 且
+///   类型 `[esi+type_offset] ∈ [type_min,type_max]`。
+struct CaptureCfg {
+    std::string type = "weight";
+    // weight:重量偏移与上限
+    uint32_t offset = 0xF8;
+    uint32_t max = 1000;
+    // item_type:标记判定与类型区间
+    uint32_t mark_offset = 0x1C;
+    uint32_t mark_value = 101;
+    uint32_t type_offset = 0xFC;
+    uint32_t type_min = 7;
+    uint32_t type_max = 34;
+};
+
 /// AOB 注入目标与捕获条件(对应 Python 的 HookCfg)。
 struct HookCfg {
     std::string module = "EasyRPG116.dll";
     uint32_t offset = 0x1D0D;               // 注入偏移
-    std::string aob = "8B 44 86 1E 5E";     // 参考原指令字节
-    uint32_t weight_offset = 0xF8;          // 重量字段偏移(捕获有效性判定)
-    uint32_t weight_max = 1000;             // 重量 <= 此值才捕获
+    std::string aob = "8B 44 86 1E 5E";     // 参考原指令字节(现按模式 8B 44 86 ?? 5E 识别)
+    uint32_t weight_offset = 0xF8;          // 兼容旧配置:未写 capture 时的重量字段偏移
+    uint32_t weight_max = 1000;             // 兼容旧配置:重量上限
+    std::optional<CaptureCfg> capture;      // 捕获条件;未设置视为 weight 类型(用 weight_* 兜底)
 };
 
 /// 条件字段配置:{"field": <label>, "values": [..]}(对应 Python 的 conditional)。
@@ -66,10 +87,15 @@ struct AttrListCfg {
     uint32_t value_offset = 0x20;
     uint32_t node_size = 0x28;           // 单个节点数据区大小
     uint32_t max_nodes = 30;             // 遍历/写入上限,防止坏链表死循环
-    // 静态节点池:原版修改器在游戏静态零缓冲顶部按 static_slot 一个槽向下分配新节点。
-    uint32_t static_base = 0x00901000;   // 池区起始地址
-    uint32_t static_size = 0x1000;       // 池区大小
+    // 节点池:新增节点时从池里按 static_slot 一个槽从顶部向下分配。
+    //   pool_type="static"(固定静态区,原版修改器实测):游戏静态零缓冲,不会 free,可安全复用。
+    //   pool_type="dynamic"(steam 版,对齐 web.ct):VirtualAllocEx 动态分配,
+    //     游戏不认识这块内存、不会 free,地址每次运行时总是有效。
+    // GameModder 按 pool_type 分发(_pool_cfg 返回 (base,size)),无 if-else。
+    uint32_t static_base = 0x00901000;   // 池区起始地址(pool_type=dynamic 时忽略)
+    uint32_t static_size = 0x1000;       // 池区大小(dynamic 时至少保证 30 槽)
     uint32_t static_slot = 0x30;         // 每个槽位间隔字节
+    std::string pool_type = "static";    // "static"(固定区)| "dynamic"(VirtualAllocEx 分配)
 };
 
 /// 一种版本下的全部偏移(对应 Python 的 ModeCfg)。
@@ -95,8 +121,10 @@ public:
         if (modes.count(id)) current_mode = id;
     }
 
-    /// 默认模式(来自对齐的 Cheat Engine 表,与 Python default_mode 一致)。
+    /// 默认模式 v1.30(来自对齐的 Cheat Engine 表,与 Python default_mode/mode0 一致)。
     static ModeCfg DefaultMode();
+    /// Steam 版模式(mode1,对齐 web.ct)。
+    static ModeCfg SteamMode();
     static OffsetsConfig Default();
 
     /// 类型映射文本("值:名字" 每行一条),与 Python TYPE_MAPPING_TEXT 一致。
