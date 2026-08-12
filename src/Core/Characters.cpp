@@ -1,0 +1,306 @@
+// 队伍角色属性结构体定义与读写(对应 Python poqeditor_py/characters.py)。
+//
+// 仅实现 UI 用到的固定偏移定位(LocateByOffsets)与字段读写,不包含全内存扫描
+// (locate_members)与 CharCapture AOB hook--Python 的 main_window 也只用固定偏移定位。
+
+#include "Core/Characters.h"
+
+#include <algorithm>
+#include <cstring>
+#include <set>
+#include <utility>
+#include <windows.h>
+
+namespace poq {
+
+// ---------------------------------------------------------------------------
+// GBK 编码辅助(与 GameModder.cpp 内同名函数等价,这里为保持 Characters 自包含)
+// ---------------------------------------------------------------------------
+namespace {
+
+// 把一个 Unicode 码点编码为 GBK(CP936)字节。失败用 "?" 替代。
+std::string GbkEncodeOne(uint32_t cp) {
+    wchar_t wbuf[2];
+    int n = 0;
+    if (cp > 0xFFFF) {
+        wbuf[0] = L'?';
+        n = 1;
+    } else {
+        wbuf[0] = static_cast<wchar_t>(cp);
+        n = 1;
+    }
+    char buf[8];
+    int len = ::WideCharToMultiByte(936, 0, wbuf, n, buf, sizeof(buf), nullptr, nullptr);
+    if (len <= 0) return "?";
+    return std::string(buf, static_cast<size_t>(len));
+}
+
+// 把 UTF-8 字符串解码为 Unicode 码点序列(非法字节跳过)。
+std::vector<uint32_t> Utf8ToCodepoints(const std::string& s) {
+    std::vector<uint32_t> out;
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        uint32_t cp = 0;
+        size_t need = 0;
+        if (c < 0x80) {
+            cp = c;
+            need = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            cp = c & 0x1F;
+            need = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            cp = c & 0x0F;
+            need = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            cp = c & 0x07;
+            need = 4;
+        } else {
+            ++i;
+            continue;
+        }
+        if (i + need > s.size()) break;
+        bool ok = true;
+        for (size_t k = 1; k < need; ++k) {
+            unsigned char cc = static_cast<unsigned char>(s[i + k]);
+            if ((cc & 0xC0) != 0x80) {
+                ok = false;
+                break;
+            }
+            cp = (cp << 6) | (cc & 0x3F);
+        }
+        if (!ok) {
+            ++i;
+            continue;
+        }
+        out.push_back(cp);
+        i += need;
+    }
+    return out;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// 字段表
+// ---------------------------------------------------------------------------
+const std::vector<std::string>& MemberNames() {
+    static const std::vector<std::string> kNames = {"扶苏", "孔刚", "田玥琳", "张良", "瑶彤"};
+    return kNames;
+}
+
+const std::vector<CharFieldCfg>& GlobalFields() {
+    static const std::vector<CharFieldCfg> kFields = {
+        CharFieldCfg{"金钱", 0x2C, 0, CharKind::Dword, {}, 0, 99999999, std::nullopt},
+    };
+    return kFields;
+}
+
+const std::vector<CharFieldCfg>& CharFields() {
+    static const std::vector<CharFieldCfg> kFields = {
+        CharFieldCfg{"姓名", 0x00, 0, CharKind::StringPtr, {}, std::nullopt, std::nullopt, std::nullopt},
+        CharFieldCfg{"别名", 0x04, 0, CharKind::StringPtr, {}, std::nullopt, std::nullopt, std::nullopt},
+        CharFieldCfg{"职业", 0x398, 0, CharKind::Enum, {{1, "游侠"}, {2, "力士"}, {3, "刺客"}, {4, "术士"}, {5, "巫师"}}, std::nullopt, std::nullopt, std::string("谨慎修改")},
+        CharFieldCfg{"性别", 0x10, 0, CharKind::Enum, {{0, "男"}, {1, "女"}}, std::nullopt, std::nullopt, std::nullopt},
+        CharFieldCfg{"等级", 0x0C, 0, CharKind::Dword, {}, 1, 99, std::nullopt},
+        CharFieldCfg{"年龄", 0x14, 0, CharKind::Dword, {}, 1, 99, std::nullopt},
+        CharFieldCfg{"经验", 0x1C, 0, CharKind::Dword, {}, 0, std::nullopt, std::nullopt},
+        CharFieldCfg{"下一级", 0x20, 0, CharKind::Dword, {}, 0, std::nullopt, std::nullopt},
+        CharFieldCfg{"声望", 0x28, 0, CharKind::Word, {}, 0, 65535, std::nullopt},
+        CharFieldCfg{"生命", 0x30, 0x34, CharKind::Pair, {}, 0, 999999, std::nullopt},
+        CharFieldCfg{"精气", 0x38, 0x3C, CharKind::Pair, {}, 0, 999999, std::nullopt},
+        CharFieldCfg{"力量", 0x48, 0, CharKind::Dword, {}, 0, 9999, std::nullopt},
+        CharFieldCfg{"体质", 0x4C, 0, CharKind::Dword, {}, 0, 9999, std::nullopt},
+        CharFieldCfg{"敏捷", 0x50, 0, CharKind::Dword, {}, 0, 9999, std::nullopt},
+        CharFieldCfg{"悟性", 0x58, 0, CharKind::Dword, {}, 0, 9999, std::nullopt},
+        CharFieldCfg{"魅力", 0x5C, 0, CharKind::Dword, {}, 0, 9999, std::nullopt},
+        CharFieldCfg{"智慧", 0x60, 0, CharKind::Dword, {}, 0, 9999, std::nullopt},
+        CharFieldCfg{"普通攻击", 0x64, 0x68, CharKind::Pair, {}, 0, 9999, std::nullopt},
+        CharFieldCfg{"金攻击", 0x6C, 0x70, CharKind::Pair, {}, 0, 9999, std::nullopt},
+        CharFieldCfg{"木攻击", 0x74, 0x78, CharKind::Pair, {}, 0, 9999, std::nullopt},
+        CharFieldCfg{"水攻击", 0x7C, 0x80, CharKind::Pair, {}, 0, 9999, std::nullopt},
+        CharFieldCfg{"火攻击", 0x84, 0x88, CharKind::Pair, {}, 0, 9999, std::nullopt},
+        CharFieldCfg{"土攻击", 0x8C, 0x90, CharKind::Pair, {}, 0, 9999, std::nullopt},
+        CharFieldCfg{"普通防御", 0x94, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
+        CharFieldCfg{"金防御", 0x98, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
+        CharFieldCfg{"木防御", 0x9C, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
+        CharFieldCfg{"水防御", 0xA0, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
+        CharFieldCfg{"火防御", 0xA4, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
+        CharFieldCfg{"土防御", 0xA8, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
+        CharFieldCfg{"闪避率", 0xAC, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
+        CharFieldCfg{"命中率", 0xB0, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
+        CharFieldCfg{"剩余属性点", 0x274, 0, CharKind::Word, {}, 0, 65535, std::nullopt},
+        CharFieldCfg{"剩余技能点", 0x278, 0, CharKind::Word, {}, 0, 65535, std::nullopt},
+    };
+    return kFields;
+}
+
+const std::map<std::string, std::map<std::string, uint32_t>>& MemberOffsets() {
+    static const std::map<std::string, std::map<std::string, uint32_t>> kOffsets = {
+        // Steam 版:EasyRPG.dll
+        {"EasyRPG.dll", {
+            {"扶苏", 0x4797FC}, {"孔刚", 0x4799A4}, {"田玥琳", 0x479AE8},
+            {"张良", 0x479C14}, {"瑶彤", 0x479D68},
+        }},
+        // v1.30 版:EasyRPG116.dll(CE 实测)
+        {"EasyRPG116.dll", {
+            {"扶苏", 0x37459C}, {"孔刚", 0x374744}, {"田玥琳", 0x374888},
+            {"张良", 0x3749B4}, {"瑶彤", 0x374B08},
+        }},
+    };
+    return kOffsets;
+}
+
+// ---------------------------------------------------------------------------
+// 固定偏移定位
+// ---------------------------------------------------------------------------
+std::vector<std::pair<std::string, uintptr_t>> LocateByOffsets(ProcessMemory& mem, unsigned int pid,
+                                                 const std::string& module) {
+    std::vector<std::pair<std::string, uintptr_t>> result;
+    auto base_opt = ProcessMemory::FindModuleBase(pid, module);
+    if (!base_opt) return result;
+    uintptr_t base = *base_opt;
+    auto it = MemberOffsets().find(module);
+    if (it == MemberOffsets().end()) return result;
+
+    // 按偏移值升序遍历(槽位顺序),动态读每个槽位实际名字。
+    std::vector<uint32_t> offsets;
+    for (const auto& kv : it->second) offsets.push_back(kv.second);
+    std::sort(offsets.begin(), offsets.end());
+
+    std::set<std::string> seen;  // 同名槽位合并(保留首次)
+    for (uint32_t off : offsets) {
+        try {
+            unsigned int edi = mem.ReadUInt32(base + off);
+            if (!(edi > 0x10000 && edi < 0xFFFFFF00)) continue;
+            uintptr_t struct_base = edi + 0x28;  // 结构体 = EDI + 0x28
+            unsigned int np = mem.ReadUInt32(struct_base);  // 姓名指针 @ +0x00
+            if (!(np > 0x10000 && np < 0xFFFFFF00)) continue;
+            auto s_opt = mem.ReadStringGbk(np, 40, 936);
+            if (!s_opt || s_opt->empty() || *s_opt == "未知" || *s_opt == "未知物品") continue;
+            // 有效角色校验:等级 1-99、生命/精气合理(排除空槽 FFFFFFFF 残留)
+            unsigned int lvl = mem.ReadUInt32(struct_base + 0x0C);
+            unsigned int hp = mem.ReadUInt32(struct_base + 0x30);
+            unsigned int mp = mem.ReadUInt32(struct_base + 0x38);
+            if (!(lvl >= 1 && lvl <= 99 && hp >= 1 && hp <= 99999 && mp >= 1 && mp <= 99999)) continue;
+            // 同名槽位合并(保留首次)
+            if (seen.count(*s_opt)) continue;
+            seen.insert(*s_opt);
+            result.emplace_back(*s_opt, struct_base);
+        } catch (...) {
+            continue;
+        }
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// 字段读写
+// ---------------------------------------------------------------------------
+std::optional<CharValue> ReadCharField(ProcessMemory& mem, uintptr_t base, const CharFieldCfg& f) {
+    try {
+        CharValue v;
+        if (f.kind == CharKind::Pair) {
+            v.is_pair = true;
+            v.lo = static_cast<int>(mem.ReadUInt32(base + f.offset_lo));
+            v.hi = static_cast<int>(mem.ReadUInt32(base + f.offset_hi));
+            return v;
+        }
+        if (f.kind == CharKind::StringPtr) {
+            uintptr_t ptr = mem.ReadUInt32(base + f.offset_lo);
+            if (ptr == 0 || ptr == 0xFFFFFFFF) {
+                v.str = "未知";
+                return v;
+            }
+            auto s = mem.ReadStringGbk(ptr, 100, 936);
+            v.str = (s && !s->empty()) ? *s : "未知";
+            return v;
+        }
+        if (f.kind == CharKind::Word) {
+            v.lo = static_cast<int>(mem.ReadWord(base + f.offset_lo));
+            return v;
+        }
+        // dword / enum
+        v.lo = static_cast<int>(mem.ReadUInt32(base + f.offset_lo));
+        return v;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+bool WriteCharField(ProcessMemory& mem, uintptr_t base, const CharFieldCfg& f, const CharValue& v) {
+    try {
+        if (f.kind == CharKind::Pair) {
+            mem.WriteUInt32(base + f.offset_lo, static_cast<unsigned int>(v.lo));
+            mem.WriteUInt32(base + f.offset_hi, static_cast<unsigned int>(v.hi));
+            return true;
+        }
+        if (f.kind == CharKind::StringPtr) {
+            // 字符串原地写(限 50 字符,GBK,按字符边界截断)
+            uintptr_t ptr = mem.ReadUInt32(base + f.offset_lo);
+            if (ptr == 0 || ptr == 0xFFFFFFFF) return false;
+            std::string data;
+            int count = 0;
+            for (uint32_t cp : Utf8ToCodepoints(v.str)) {
+                if (count >= 50) break;
+                std::string chb = GbkEncodeOne(cp);
+                if (data.size() + chb.size() > 100) break;
+                data += chb;
+                ++count;
+            }
+            data.push_back('\0');
+            mem.Write(ptr, std::vector<unsigned char>(data.begin(), data.end()));
+            return true;
+        }
+        if (f.kind == CharKind::Word) {
+            mem.WriteWord(base + f.offset_lo, static_cast<uint16_t>(v.lo));
+            return true;
+        }
+        // dword / enum
+        mem.WriteUInt32(base + f.offset_lo, static_cast<unsigned int>(v.lo));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::optional<std::string> ValidateValue(const CharFieldCfg& f, const CharValue& v) {
+    if (f.kind == CharKind::StringPtr) {
+        if (v.str.size() > 50) return f.label + ":字符串长度不能超过 50";
+        return std::nullopt;
+    }
+    if (f.kind == CharKind::Enum) {
+        if (!f.enum_map.count(v.lo)) return f.label + ":无效选项";
+        return std::nullopt;
+    }
+    if (f.kind == CharKind::Pair) {
+        if (f.min && (v.lo < *f.min || v.hi < *f.min)) return f.label + ":不能小于 " + std::to_string(*f.min);
+        if (f.max && (v.lo > *f.max || v.hi > *f.max)) return f.label + ":不能大于 " + std::to_string(*f.max);
+        if (v.lo > v.hi) return f.label + ":下限不能大于上限";
+        return std::nullopt;
+    }
+    // dword / word
+    if (f.min && v.lo < *f.min) return f.label + ":不能小于 " + std::to_string(*f.min);
+    if (f.max && v.lo > *f.max) return f.label + ":不能大于 " + std::to_string(*f.max);
+    return std::nullopt;
+}
+
+std::map<std::string, CharValue> ReadAllChar(ProcessMemory& mem, uintptr_t base) {
+    std::map<std::string, CharValue> out;
+    for (const auto& f : CharFields()) {
+        auto v = ReadCharField(mem, base, f);
+        if (v) out[f.label] = *v;
+    }
+    return out;
+}
+
+std::map<std::string, CharValue> ReadGlobalChar(ProcessMemory& mem, uintptr_t base) {
+    std::map<std::string, CharValue> out;
+    for (const auto& f : GlobalFields()) {
+        auto v = ReadCharField(mem, base, f);
+        if (v) out[f.label] = *v;
+    }
+    return out;
+}
+
+}  // namespace poq

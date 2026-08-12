@@ -24,8 +24,8 @@ struct CaptureCfg {
     uint32_t mark_offset = 0x1C;
     uint32_t mark_value = 101;
     uint32_t type_offset = 0xFC;
-    uint32_t type_min = 7;
-    uint32_t type_max = 34;
+    uint32_t type_min = 0;
+    uint32_t type_max = 52;
 };
 
 /// AOB 注入目标与捕获条件(对应 Python 的 HookCfg)。

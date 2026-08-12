@@ -36,6 +36,8 @@ public:
     const OffsetsConfig& Config() const { return config_; }
     OffsetsConfig& Config() { return config_; }
     ProcessMemory& Mem() { return mem_; }
+    /// 当前打开的进程 PID(0 = 未打开;角色定位等需要按 pid 查模块基址)。
+    unsigned int Pid() const { return pid_; }
 
     /// 是否已注入(cur_item 槽地址非 0)。
     bool IsInjected() const { return cur_item_addr_ != 0; }

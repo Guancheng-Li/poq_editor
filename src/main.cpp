@@ -33,6 +33,7 @@
 #include "imgui_impl_win32.h"
 
 #include "Core/GameModder.h"
+#include "Core/Characters.h"
 #include "Core/ItemData.h"
 #include "Core/ItemProperty.h"
 #include "Core/Json.h"
@@ -64,15 +65,6 @@ std::string ToLower(const std::string& s) {
     return out;
 }
 
-std::wstring Utf8ToWide(const std::string& s) {
-    if (s.empty()) return L"";
-    int wlen = ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    if (wlen <= 0) return L"";
-    std::wstring out(static_cast<size_t>(wlen), L'\0');
-    ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), &out[0], wlen);
-    return out;
-}
-
 std::string WideToUtf8(const std::wstring& w) {
     if (w.empty()) return "";
     int len = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
@@ -90,8 +82,17 @@ std::wstring AppDirW() {
     return pos == std::wstring::npos ? L"." : p.substr(0, pos);
 }
 
+// imgui 消息弹窗队列(替代系统 MessageBox:入队后主循环逐帧弹 imgui modal,
+// 样式与启动免责声明弹窗一致)。单文件单实例,全局队列保持 MsgBox 调用点签名不变。
+struct MessageBoxMsg {
+    std::string title;
+    std::string text;
+    int type = MB_ICONINFORMATION;
+};
+std::vector<MessageBoxMsg> g_msgbox_queue;
+
 void MsgBox(const std::string& title, const std::string& text, UINT type) {
-    ::MessageBoxW(nullptr, Utf8ToWide(text).c_str(), Utf8ToWide(title).c_str(), type);
+    g_msgbox_queue.push_back(MessageBoxMsg{title, text, static_cast<int>(type)});
 }
 
 std::string OpenFileDialog(const std::wstring& dir, const wchar_t* filter) {
@@ -248,6 +249,14 @@ std::vector<unsigned char> ParseHexDump(const std::string& text) {
 // App 状态(对应 cpp MainWindow 的成员)
 // ============================================================================
 
+// 角色字段控件状态(当前选中角色一份;切换角色时从内存重填)。
+struct CharWidget {
+    int intval = 0;           // dword/word/enum
+    int pair_lo = 0;          // pair 下限
+    int pair_hi = 0;          // pair 上限
+    char strbuf[128] = {0};   // string_ptr(UTF-8,足够 50 个汉字)
+};
+
 struct App {
     OffsetsConfig cfg;
     GameModder modder;
@@ -293,6 +302,20 @@ struct App {
     char cfg_node_size[32] = {0};
     char cfg_max_nodes[32] = {0};
 
+    // ---- 属性修改(角色)----
+    std::map<std::string, uintptr_t> char_addrs;   // 姓名 -> 结构体地址
+    std::vector<std::string> char_names;           // 下拉顺序(角色x-名字)
+    int char_selected = 0;
+    std::vector<CharWidget> char_widgets;          // 平行 CharFields,当前选中角色
+    char money_buf[32] = {0};                      // 全局金钱输入
+    bool ck_invincible = false;                    // 无敌模式
+    bool ck_kill = false;                          // 一击必杀
+    // 锁原值缓存:姓名 -> {label: 原值}(勾选时缓存,取消时恢复)
+    std::map<std::string, std::map<std::string, CharValue>> def_cache;  // 防御/闪避
+    std::map<std::string, std::map<std::string, CharValue>> hit_cache;  // 攻击/命中率
+    float lock_accum = 0.0f;                       // 锁定时器累加(500ms 写回一次)
+    std::string char_status;                       // 角色 tab 状态文本
+
     // ---- 状态 / 静态选项 ----
     bool hidden = true;  // F12 前隐藏调试 tab
     bool show_welcome = true;  // 启动免责声明弹窗(每次打开应用显示一次)
@@ -302,6 +325,7 @@ struct App {
     App() : cfg(OffsetsConfig::Default()), modder(cfg) {
         basic_fields = cfg.Current().basic_fields;
         RebuildBasic();
+        char_widgets.assign(CharFields().size(), CharWidget());  // 属性修改网格(未读取时全空)
         for (const auto& kv : ItemData::AttrNames()) attr_ids.push_back(kv.first);
         for (const auto& kv : ItemData::ColorNames()) color_ids.push_back(kv.first);
         for (const auto& kv : ItemData::PercentNames()) percent_ids.push_back(kv.first);
@@ -378,6 +402,9 @@ struct App {
 // 进程 / 业务逻辑(对应 cpp MainWindow 的 slot)
 // ============================================================================
 
+// 前向声明:OnInit 调用 OnCharRead(定义在后面的属性修改逻辑区)。
+void OnCharRead(App& app);
+
 std::optional<unsigned int> TryGetSelectedPid(const App& app) {
     if (app.proc_selected >= 0 && static_cast<size_t>(app.proc_selected) < app.processes.size())
         return app.processes[static_cast<size_t>(app.proc_selected)].pid;
@@ -438,6 +465,11 @@ void OnInit(App& app) {
             } else {
                 app.SetStatus(prefix + "初始化成功(已注入)。");
             }
+        }
+        // 初始化后自动加载角色属性(对齐 Python _on_init)
+        try {
+            OnCharRead(app);
+        } catch (...) {
         }
     } catch (const std::exception& ex) {
         std::string msg = Sanitize(ex.what(), !app.hidden);
@@ -525,6 +557,9 @@ void OnSave(App& app) {
         }
         msg += "请在游戏中把物品扔到地上再捡起使修改生效。";
         app.SetStatus(msg);
+        MsgBox("修改成功",
+               "请在游戏中把物品扔到地上在捡起来使修改生效",
+               MB_ICONINFORMATION);
     } catch (const std::exception& ex) {
         std::string msg = Sanitize(ex.what(), !app.hidden);
         MsgBox("保存失败", msg, MB_ICONERROR);
@@ -672,6 +707,320 @@ void OnSaveCfg(App& app) {
 }
 
 // ============================================================================
+// 属性修改(角色)逻辑(对应 Python main_window.py 的 _on_char_* / _lock_*)
+// ============================================================================
+
+// 无敌模式涉及的防御字段(普通防御 + 五行防御)。
+const std::set<std::string>& DefLabels() {
+    static const std::set<std::string> s = {"普通防御", "金防御", "木防御", "水防御", "火防御", "土防御"};
+    return s;
+}
+// 一击必杀涉及的攻击字段(普通攻击 + 五行攻击,均为 pair)。
+const std::set<std::string>& AtkLabels() {
+    static const std::set<std::string> s = {"普通攻击", "金攻击", "木攻击", "水攻击", "火攻击", "土攻击"};
+    return s;
+}
+
+// 字段在当前锁状态下是否应禁用编辑(无敌:生命/精气/防御/闪避率;一击必杀:攻击/命中率)。
+bool IsCharFieldLocked(const App& app, const std::string& label) {
+    if (app.ck_invincible) {
+        if (label == "生命" || label == "精气" || label == "闪避率" || DefLabels().count(label)) return true;
+    }
+    if (app.ck_kill) {
+        if (label == "命中率" || AtkLabels().count(label)) return true;
+    }
+    return false;
+}
+
+// 按 label 查 CharFields 索引(找不到返回 -1)。
+int FindCharField(const std::string& label) {
+    const auto& fs = CharFields();
+    for (size_t i = 0; i < fs.size(); ++i)
+        if (fs[i].label == label) return static_cast<int>(i);
+    return -1;
+}
+
+// 为当前选中角色重建字段控件(从内存读取并填充)。
+void RebuildCharWidgets(App& app) {
+    if (app.char_names.empty() || app.char_selected < 0 ||
+        static_cast<size_t>(app.char_selected) >= app.char_names.size()) {
+        app.char_widgets.clear();
+        return;
+    }
+    const std::string& name = app.char_names[static_cast<size_t>(app.char_selected)];
+    auto it = app.char_addrs.find(name);
+    if (it == app.char_addrs.end()) {
+        app.char_widgets.clear();
+        return;
+    }
+    uintptr_t base = it->second;
+    app.char_widgets.assign(CharFields().size(), CharWidget());
+    auto values = ReadAllChar(app.modder.Mem(), base);
+    for (size_t i = 0; i < CharFields().size(); ++i) {
+        const auto& f = CharFields()[i];
+        CharWidget& w = app.char_widgets[i];
+        auto vit = values.find(f.label);
+        if (vit == values.end()) continue;  // 读取失败:保留默认 0
+        const CharValue& v = vit->second;
+        if (f.kind == CharKind::StringPtr) {
+            std::snprintf(w.strbuf, sizeof(w.strbuf), "%s", v.str.c_str());
+        } else if (f.kind == CharKind::Pair) {
+            w.pair_lo = v.lo;
+            w.pair_hi = v.hi;
+        } else {
+            w.intval = v.lo;
+        }
+    }
+}
+
+// 读取全部队员:用固定偏移定位(按当前模式的引擎模块选偏移表),填充下拉框 + 全局属性。
+void OnCharRead(App& app) {
+    if (!app.modder.Mem().IsOpen()) {
+        app.char_status = "请先点击\"初始化\"。";
+        app.SetStatus("请先点击\"初始化\"。");
+        return;
+    }
+    try {
+        const std::string& module = app.cfg.Current().hook.module;  // steam/v1.30
+        auto located = LocateByOffsets(app.modder.Mem(), app.modder.Pid(), module);
+        if (located.empty()) {
+            app.char_status = "未定位到队员(偏移可能失效)。";
+            app.SetStatus("未定位到任何队员。");
+            return;
+        }
+        app.char_addrs.clear();
+        app.char_names.clear();
+        for (auto& kv : located) {
+            app.char_addrs[kv.first] = kv.second;  // map 供按名查找
+            app.char_names.push_back(kv.first);     // 槽位顺序保留下拉框
+        }
+        app.char_selected = 0;
+        // 全局属性:从第 1 人读
+        const std::string& first = app.char_names.front();
+        auto g = ReadGlobalChar(app.modder.Mem(), app.char_addrs[first]);
+        auto mit = g.find("金钱");
+        if (mit != g.end()) std::snprintf(app.money_buf, sizeof(app.money_buf), "%d", mit->second.lo);
+        RebuildCharWidgets(app);
+        app.char_status = "已定位 " + std::to_string(located.size()) + " 人。";
+        app.SetStatus("读取完成:定位 " + std::to_string(located.size()) + " 人。");
+    } catch (const std::exception& ex) {
+        app.char_status = "读取失败:" + Sanitize(ex.what(), !app.hidden);
+        app.SetStatus("读取失败:" + Sanitize(ex.what(), !app.hidden));
+    }
+}
+
+// 保存当前选中角色属性:收集 -> 校验(有非法则整体拒绝) -> 写入。
+void OnCharSave(App& app) {
+    if (!app.modder.Mem().IsOpen()) {
+        app.SetStatus("请先点击\"初始化\"。");
+        return;
+    }
+    if (app.char_addrs.empty()) {
+        app.SetStatus("请先\"读取属性\"定位队员。");
+        return;
+    }
+    if (app.char_selected < 0 || static_cast<size_t>(app.char_selected) >= app.char_names.size()) {
+        app.SetStatus("请先选择角色。");
+        return;
+    }
+    const std::string& name = app.char_names[static_cast<size_t>(app.char_selected)];
+    uintptr_t base = app.char_addrs[name];
+    // 1) 收集全部字段值
+    std::map<std::string, CharValue> values;
+    for (size_t i = 0; i < CharFields().size(); ++i) {
+        const auto& f = CharFields()[i];
+        const CharWidget& w = app.char_widgets[i];
+        CharValue v;
+        if (f.kind == CharKind::StringPtr) {
+            v.str = w.strbuf;
+        } else if (f.kind == CharKind::Pair) {
+            v.is_pair = true;
+            v.lo = w.pair_lo;
+            v.hi = w.pair_hi;
+        } else {
+            v.lo = w.intval;
+        }
+        values[f.label] = v;
+    }
+    // 2) 校验全部字段(有非法则弹窗并拒绝,整次不写)
+    std::vector<std::string> errors;
+    for (const auto& f : CharFields()) {
+        auto err = ValidateValue(f, values[f.label]);
+        if (err) errors.push_back(*err);
+    }
+    if (!errors.empty()) {
+        std::string msg = "以下字段不合法,未保存:\n\n";
+        for (const auto& e : errors) msg += e + "\n";
+        MsgBox("校验失败", msg, MB_ICONERROR);
+        app.SetStatus("校验失败,未保存:" + name + "。");
+        return;
+    }
+    // 3) 校验通过,写入
+    int saved = 0;
+    for (const auto& f : CharFields()) {
+        if (WriteCharField(app.modder.Mem(), base, f, values[f.label])) ++saved;
+    }
+    app.char_status = "保存完成:" + name + " " + std::to_string(saved) + " 个字段已写入。请在游戏中验证。";
+    app.SetStatus("角色属性保存完成:" + name + "。");
+    MsgBox("保存完成",
+           "请存档后重新读档查看变化，部分属性词条可能因道具属性加成与设定值不同",
+           MB_ICONINFORMATION);
+}
+
+// 修改金钱按钮:校验后仅写第 1 人 +0x2C。
+void OnMoneyApply(App& app) {
+    if (!app.modder.Mem().IsOpen() || app.char_addrs.empty()) {
+        app.SetStatus("请先初始化并读取属性。");
+        return;
+    }
+    const auto& gf = GlobalFields().front();  // 金钱
+    std::string t = Trim(app.money_buf);
+    char* end = nullptr;
+    long long val = std::strtoll(t.c_str(), &end, 10);
+    if (end == t.c_str() || *end != '\0') {
+        MsgBox("输入错误", "金钱必须是整数(0 ~ 99999999)。", MB_ICONWARNING);
+        return;
+    }
+    CharValue v;
+    v.lo = static_cast<int>(val);
+    auto err = ValidateValue(gf, v);
+    if (err) {
+        MsgBox("输入错误", *err, MB_ICONWARNING);
+        return;
+    }
+    const std::string& first = app.char_names.front();
+    WriteCharField(app.modder.Mem(), app.char_addrs[first], gf, v);
+    MsgBox("金钱已修改", "修改后丢弃金钱、购买商品、捡起金钱，数额才会更新", MB_ICONINFORMATION);
+}
+
+// ---- 无敌 / 一击必杀锁 ----
+// 立即把已启用锁的字段写为 9999(对所有队员,不等定时器)。
+void LockWriteOnce(App& app) {
+    if (!app.modder.Mem().IsOpen() || app.char_addrs.empty()) return;
+    if (!app.ck_invincible && !app.ck_kill) return;
+    for (const auto& kv : app.char_addrs) {
+        uintptr_t base = kv.second;
+        try {
+            if (app.ck_invincible) {
+                app.modder.Mem().WriteUInt32(base + 0x30, 9999);  // 当前生命
+                app.modder.Mem().WriteUInt32(base + 0x38, 9999);  // 当前精气
+                for (const auto& f : CharFields()) {
+                    if (DefLabels().count(f.label) || f.label == "闪避率") {
+                        CharValue v;
+                        v.lo = 9999;
+                        WriteCharField(app.modder.Mem(), base, f, v);
+                    }
+                }
+            }
+            if (app.ck_kill) {
+                for (const auto& f : CharFields()) {
+                    if (AtkLabels().count(f.label)) {
+                        CharValue v;
+                        v.is_pair = true;
+                        v.lo = 9999;
+                        v.hi = 9999;
+                        WriteCharField(app.modder.Mem(), base, f, v);
+                    } else if (f.label == "命中率") {
+                        CharValue v;
+                        v.lo = 9999;
+                        WriteCharField(app.modder.Mem(), base, f, v);
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
+}
+
+// 无敌模式勾选/取消。
+void OnInvincibleToggled(App& app, bool checked) {
+    if (checked) {
+        // 缓存防御/闪避原值(所有队员)
+        app.def_cache.clear();
+        for (const auto& kv : app.char_addrs) {
+            for (const auto& f : CharFields()) {
+                if (DefLabels().count(f.label) || f.label == "闪避率") {
+                    auto v = ReadCharField(app.modder.Mem(), kv.second, f);
+                    if (v) app.def_cache[kv.first][f.label] = *v;
+                }
+            }
+        }
+        LockWriteOnce(app);  // 立即写 9999
+    } else {
+        // 取消:生命=最大生命、精气=最大精气、防御+闪避=缓存值
+        for (const auto& kv : app.char_addrs) {
+            uintptr_t base = kv.second;
+            try {
+                unsigned int mx_hp = app.modder.Mem().ReadUInt32(base + 0x34);
+                app.modder.Mem().WriteUInt32(base + 0x30, mx_hp);
+                unsigned int mx_mp = app.modder.Mem().ReadUInt32(base + 0x3C);
+                app.modder.Mem().WriteUInt32(base + 0x38, mx_mp);
+                for (const auto& f : CharFields()) {
+                    if (DefLabels().count(f.label) || f.label == "闪避率") {
+                        auto cit = app.def_cache.find(kv.first);
+                        if (cit != app.def_cache.end()) {
+                            auto fit = cit->second.find(f.label);
+                            if (fit != cit->second.end())
+                                WriteCharField(app.modder.Mem(), base, f, fit->second);
+                        }
+                    }
+                }
+            } catch (...) {
+            }
+        }
+        app.def_cache.clear();
+    }
+}
+
+// 一击必杀勾选/取消。
+void OnKillToggled(App& app, bool checked) {
+    if (checked) {
+        // 缓存攻击/命中率原值(所有队员)
+        app.hit_cache.clear();
+        for (const auto& kv : app.char_addrs) {
+            for (const auto& f : CharFields()) {
+                if (AtkLabels().count(f.label) || f.label == "命中率") {
+                    auto v = ReadCharField(app.modder.Mem(), kv.second, f);
+                    if (v) app.hit_cache[kv.first][f.label] = *v;
+                }
+            }
+        }
+        LockWriteOnce(app);  // 立即写 9999
+    } else {
+        // 取消:攻击/命中率恢复原值
+        for (const auto& kv : app.char_addrs) {
+            uintptr_t base = kv.second;
+            try {
+                for (const auto& f : CharFields()) {
+                    if (AtkLabels().count(f.label) || f.label == "命中率") {
+                        auto cit = app.hit_cache.find(kv.first);
+                        if (cit != app.hit_cache.end()) {
+                            auto fit = cit->second.find(f.label);
+                            if (fit != cit->second.end())
+                                WriteCharField(app.modder.Mem(), base, f, fit->second);
+                        }
+                    }
+                }
+            } catch (...) {
+            }
+        }
+        app.hit_cache.clear();
+    }
+}
+
+// 锁定时器:每 500ms 把已启用锁的字段写回 9999(对所有队员)。
+void TickLock(App& app, float dt) {
+    if (!app.ck_invincible && !app.ck_kill) {
+        app.lock_accum = 0.0f;
+        return;
+    }
+    app.lock_accum += dt;
+    if (app.lock_accum < 0.5f) return;
+    app.lock_accum = 0.0f;
+    LockWriteOnce(app);
+}
+
+// ============================================================================
 // UI 渲染
 // ============================================================================
 
@@ -683,6 +1032,10 @@ int IndexOf(const std::vector<uint32_t>& ids, uint32_t v) {
 
 void RenderBasicFields(App& app) {
     auto type_val = app.CurrentTypeValue();
+    // 使用步骤提示:识别的物品是"上一次操作(选中后放下)的物品",不是光标物品
+    ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.15f, 1.0f),
+                       "使用步骤：第1步：选中箱子中的物品然后放下；第2步：读取属性并修改；第3步：丢弃修改物品再捡起，在箱子里查看修改后的属性；");
+    ImGui::Separator();
     const float avail = ImGui::GetContentRegionAvail().x;
     // 网格列数:正常宽度下武器名字/别名 2 列一行、其余 3 列一行;窗口窄时递减。
     const int cols = avail >= 900.0f ? 3 : (avail >= 600.0f ? 2 : 1);
@@ -977,6 +1330,192 @@ void RenderWelcomeDialog(App& app) {
     }
 }
 
+// 渲染待处理的消息弹窗(替代系统 MessageBox,样式与启动免责声明弹窗一致)。
+// 多个消息排队:一次弹一个,点"确认"后显示下一个。
+void RenderMsgQueue() {
+    if (g_msgbox_queue.empty()) return;
+    const MessageBoxMsg& m = g_msgbox_queue.front();
+    // 标题栏文字 = 类型(提示/错误/警告),与"关于"弹窗标题栏对齐;
+    // "##msgbox" 使窗口 ID 固定,不随类型变化。
+    const char* kType = "提示";
+    if (m.type == MB_ICONERROR) {
+        kType = "错误";
+    } else if (m.type == MB_ICONWARNING) {
+        kType = "警告";
+    }
+    std::string popup_id = std::string(kType) + "##msgbox";
+    if (!ImGui::IsPopupOpen(popup_id.c_str())) ImGui::OpenPopup(popup_id.c_str());
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Appearing);  // 固定宽,高随内容
+    if (ImGui::BeginPopupModal(popup_id.c_str(), nullptr,
+                               ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoCollapse)) {
+        const float win_w = ImGui::GetWindowSize().x;
+        // 内容(标题 + 逗号 + 正文,自动换行)
+        std::string full = m.title + "，" + m.text;
+        ImGui::PushTextWrapPos(win_w - 40.0f);
+        ImGui::TextUnformatted(full.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 16));
+        // 底部中间"确认"按钮
+        const float btn_w = 120.0f;
+        ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - btn_w) * 0.5f);
+        if (ImGui::Button("确认", ImVec2(btn_w, 30)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            g_msgbox_queue.erase(g_msgbox_queue.begin());
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+// 属性修改(角色)Tab:全局属性 + 角色选择 + 字段网格(task6 指定排列)。
+void RenderCharTab(App& app) {
+    // 使用步骤提示:角色读取用固定偏移定位,需先选择人物并读取
+    ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.15f, 1.0f),
+                       "使用步骤：第1步：选择修改人物并读取属性；第2步：修改个人属性；第3步：存档后读档查看属性；");
+    ImGui::Separator();
+    // ---- 全局属性(队伍共享,置顶)----
+    ImGui::TextUnformatted("全局属性");
+    ImGui::Separator();
+    ImGui::TextUnformatted("金钱:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140);
+    ImGui::InputText("##money", app.money_buf, sizeof(app.money_buf));
+    ImGui::SameLine();
+    if (ImGui::Button("修改金钱")) OnMoneyApply(app);
+    ImGui::SameLine();
+    bool inv = app.ck_invincible;
+    if (ImGui::Checkbox("无敌模式", &inv)) {
+        app.ck_invincible = inv;
+        OnInvincibleToggled(app, inv);
+    }
+    ImGui::SameLine();
+    bool kill = app.ck_kill;
+    if (ImGui::Checkbox("一击必杀", &kill)) {
+        app.ck_kill = kill;
+        OnKillToggled(app, kill);
+    }
+
+    // ---- 角色选择 + 读取/保存 ----
+    ImGui::Separator();
+    ImGui::TextUnformatted("角色:");
+    ImGui::SameLine();
+    std::vector<std::string> char_labels;
+    for (size_t i = 0; i < app.char_names.size(); ++i)
+        char_labels.push_back("角色" + std::to_string(i + 1) + "-" + app.char_names[i]);
+    std::vector<const char*> char_items;
+    for (const auto& l : char_labels) char_items.push_back(l.c_str());
+    int csel = app.char_selected;
+    ImGui::SetNextItemWidth(220);
+    if (ImGui::Combo("##char", &csel, char_items.data(), static_cast<int>(char_items.size()))) {
+        if (csel != app.char_selected && csel >= 0 &&
+            static_cast<size_t>(csel) < app.char_names.size()) {
+            app.char_selected = csel;
+            RebuildCharWidgets(app);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("读取属性")) OnCharRead(app);
+    ImGui::SameLine();
+    if (ImGui::Button("保存属性")) OnCharSave(app);
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", app.char_status.c_str());
+
+    ImGui::Separator();
+
+    // ---- 字段网格(task6 指定排列:3 列行 + 2 列行,各行子项等宽)----
+    static const char* kLayout[][3] = {
+        {"姓名", "别名", "职业"},
+        {"年龄", "性别", "等级"},
+        {"经验", "下一级", "声望"},
+        {"生命", "精气", nullptr},
+        {"力量", "体质", nullptr},
+        {"敏捷", "悟性", nullptr},
+        {"魅力", "智慧", nullptr},
+        {"普通攻击", "普通防御", nullptr},
+        {"金攻击", "金防御", nullptr},
+        {"木攻击", "木防御", nullptr},
+        {"水攻击", "水防御", nullptr},
+        {"火攻击", "火防御", nullptr},
+        {"土攻击", "土防御", nullptr},
+        {"闪避率", "命中率", nullptr},
+        {"剩余属性点", "剩余技能点", nullptr},
+    };
+
+    // 渲染一个字段(标签在上,输入框在下,填满列宽;pair 两个输入框 + "/")。
+    auto render_field = [&](const char* label) {
+        int idx = FindCharField(label);
+        if (idx < 0) {
+            ImGui::TextDisabled("%s(未定义)", label);
+            return;
+        }
+        const auto& f = CharFields()[static_cast<size_t>(idx)];
+        CharWidget& w = app.char_widgets[static_cast<size_t>(idx)];
+        bool disabled = app.char_addrs.empty() || IsCharFieldLocked(app, label);
+        ImGui::TextUnformatted(label);
+        ImGui::BeginDisabled(disabled);
+        std::string id = "##ch" + std::to_string(idx);
+        if (f.kind == CharKind::StringPtr) {
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::InputText(id.c_str(), w.strbuf, sizeof(w.strbuf));
+        } else if (f.kind == CharKind::Enum) {
+            std::vector<std::pair<int, std::string>> opts;
+            for (const auto& kv : f.enum_map)
+                opts.emplace_back(kv.first, std::to_string(kv.first) + "：" + kv.second);
+            std::vector<const char*> items;
+            for (const auto& o : opts) items.push_back(o.second.c_str());
+            int cur = -1;
+            for (int j = 0; j < static_cast<int>(opts.size()); ++j)
+                if (opts[static_cast<size_t>(j)].first == w.intval) {
+                    cur = j;
+                    break;
+                }
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::Combo(id.c_str(), &cur, items.data(), static_cast<int>(items.size()))) {
+                if (cur >= 0) w.intval = opts[static_cast<size_t>(cur)].first;
+            }
+        } else if (f.kind == CharKind::Pair) {
+            float avail = ImGui::GetContentRegionAvail().x;
+            float slash = ImGui::CalcTextSize("/").x + ImGui::GetStyle().ItemSpacing.x;
+            float each = (avail - slash) * 0.5f;
+            if (each < 30.0f) each = 30.0f;
+            ImGui::SetNextItemWidth(each);
+            ImGui::InputInt(("##chl" + std::to_string(idx)).c_str(), &w.pair_lo, 0, 0);
+            ImGui::SameLine(0, 0);
+            ImGui::TextUnformatted("/");
+            ImGui::SameLine(0, 0);
+            ImGui::SetNextItemWidth(each);
+            ImGui::InputInt(("##chh" + std::to_string(idx)).c_str(), &w.pair_hi, 0, 0);
+        } else {
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::InputInt(id.c_str(), &w.intval, 0, 0);
+        }
+        ImGui::EndDisabled();
+        if (f.hint) ImGui::TextDisabled("%s", f.hint->c_str());
+    };
+
+    float grid_h = ImGui::GetContentRegionAvail().y;
+    if (grid_h < 80.0f) grid_h = 80.0f;
+    ImGui::BeginChild("charfields", ImVec2(-FLT_MIN, grid_h), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_None);
+    for (size_t r = 0; r < sizeof(kLayout) / sizeof(kLayout[0]); ++r) {
+        int ncols = kLayout[r][2] ? 3 : 2;
+        char tid[32];
+        std::snprintf(tid, sizeof(tid), "charrow%zu", r);
+        if (ImGui::BeginTable(tid, ncols)) {
+            for (int c = 0; c < ncols; ++c)
+                ImGui::TableSetupColumn(nullptr, ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableNextRow();
+            for (int c = 0; c < ncols; ++c) {
+                if (ImGui::TableSetColumnIndex(c)) render_field(kLayout[r][c]);
+            }
+            ImGui::EndTable();
+        }
+    }
+    ImGui::EndChild();
+}
+
 void RenderTopBar(App& app) {
     const ImGuiStyle& style = ImGui::GetStyle();
     const float spacing = style.ItemSpacing.x;
@@ -1054,6 +1593,12 @@ void RenderTopBar(App& app) {
 void ApplyBlueTheme() {
     // 默认 imgui 蓝色主题(深色 + 蓝色强调色)
     ImGui::StyleColorsDark();
+    // 标题栏统一蓝色(经典 Windows 蓝):"关于"/消息等弹窗一致。
+    // 主窗口走系统标题栏(NoTitleBar),不受影响。
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.Colors[ImGuiCol_TitleBg] = ImVec4(0.10f, 0.24f, 0.48f, 1.00f);
+    style.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.16f, 0.40f, 0.78f, 1.00f);
+    style.Colors[ImGuiCol_TitleBgCollapsed] = ImVec4(0.10f, 0.24f, 0.48f, 0.80f);
 }
 
 // ============================================================================
@@ -1066,7 +1611,7 @@ void RenderMainWindow(App& app) {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
-    ImGui::Begin("秦殇物品修改器 (PoqEditor)", nullptr,
+    ImGui::Begin("秦殇内存修改器", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
                      ImGuiWindowFlags_NoSavedSettings);
@@ -1082,6 +1627,10 @@ void RenderMainWindow(App& app) {
 
     ImGui::BeginChild("tabarea", ImVec2(avail.x, tab_h));
     if (ImGui::BeginTabBar("maintabs")) {
+        if (ImGui::BeginTabItem("属性修改")) {
+            RenderCharTab(app);
+            ImGui::EndTabItem();
+        }
         if (ImGui::BeginTabItem("物品修改")) {
             RenderBasicFields(app);
             ImGui::Separator();
@@ -1260,7 +1809,7 @@ int RunApp(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                       hIcon, nullptr, nullptr, nullptr, L"PoqEditorImgui", nullptr};
     wc.hIconSm = hIcon;
     ::RegisterClassExW(&wc);
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"秦殇物品修改器 (PoqEditor)",
+    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"秦殇内存修改器",
                                 WS_OVERLAPPEDWINDOW, 100, 100,
                                 (int)(1100 * main_scale), (int)(720 * main_scale),
                                 nullptr, nullptr, wc.hInstance, nullptr);
@@ -1333,8 +1882,12 @@ int RunApp(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         // F12 切换调试 tab(内存查看 / 偏移设置)
         if (ImGui::IsKeyPressed(ImGuiKey_F12)) app.hidden = !app.hidden;
 
+        // 无敌/一击必杀定时写回(每 500ms,对所有队员)
+        TickLock(app, io.DeltaTime);
+
         RenderMainWindow(app);
         RenderWelcomeDialog(app);
+        RenderMsgQueue();
 
         // 渲染
         ImGui::Render();

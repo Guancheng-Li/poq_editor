@@ -53,6 +53,7 @@ set(PROJECT_SOURCES
     src/Core/Json.cpp
     src/Core/JsonTemplate.cpp
     src/Core/GameModder.cpp
+    src/Core/Characters.cpp
     src/Native/ProcessMemory.cpp
 )
 
@@ -63,6 +64,7 @@ set(PROJECT_HEADERS
     src/Core/Json.h
     src/Core/JsonTemplate.h
     src/Core/GameModder.h
+    src/Core/Characters.h
     src/Native/ProcessMemory.h
 )
 

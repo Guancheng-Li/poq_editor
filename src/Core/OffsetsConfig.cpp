@@ -162,7 +162,7 @@ ModeCfg OffsetsConfig::DefaultMode() {
     m.basic_fields.push_back(bf);
 
     bf = F("武器别名", 0x2C, "string_ptr");
-    bf.readonly = true;
+    bf.readonly = false;  // 可编辑(与武器名字同样式:原地写 GBK 字符串)
     bf.codepage = 0;
     m.basic_fields.push_back(bf);
 
@@ -262,13 +262,15 @@ ModeCfg OffsetsConfig::SteamMode() {
     m.hook.module = "EasyRPG.dll";
     m.hook.offset = 141054;  // 0x226FE
     m.hook.aob = "8B 44 86 30 5E 5D C2 04 00 83 C8 FF 5E 5D C2 04 00 CC";
-    CaptureCfg cap;  // item_type:标记==101 且类型 ∈ [7,34] 才捕获(对齐 web.ct)
+    CaptureCfg cap;  // item_type:标记==101 且类型 ∈ [0,52] 才捕获
     cap.type = "item_type";
     cap.mark_offset = 0x1C;
     cap.mark_value = 101;
     cap.type_offset = 0xFC;
-    cap.type_min = 7;
-    cap.type_max = 34;
+    // 放宽到全部物品类型(原 [7,34] 只能捕获武器/防具,木材/矿石等打造材料读不到):
+    // 0 宝石,1-5 打造材料,7-24 武器,25-34 防具,51 肉类药品,52 打造杂项。
+    cap.type_min = 0;
+    cap.type_max = 52;
     m.hook.capture = cap;
     // basic_fields 与 v1.30 相同(steam 偏移表同构)。
     m.basic_fields = DefaultMode().basic_fields;
