@@ -47,6 +47,12 @@ mkdir "%STAGE%" 2>nul
 copy /y "%RELEASE%\PoqEditor.exe" "%STAGE%\" >nul || goto :err
 copy /y "%ROOT%readme.txt" "%STAGE%\readme.txt" >nul || goto :err
 copy /y "%ROOT%readme.txt" "%BUILD%\readme.txt" >nul || goto :err
+
+rem 生成 PoqEditor.exe.sig (MD5 校验值),随包发布
+set "MD5="
+for /f "skip=1 tokens=1" %%i in ('certutil -hashfile "%STAGE%\PoqEditor.exe" MD5') do if not defined MD5 set "MD5=%%i"
+> "%STAGE%\PoqEditor.exe.sig" echo %MD5%
+echo   [sig] PoqEditor.exe.sig = %MD5%
 del /q "%RELEASE%\PoqEditor.7z" 2>nul
 pushd "%RELEASE%"
 "%SZIP%" a -t7z -mx=9 PoqEditor.7z PoqEditor || (popd & goto :err)

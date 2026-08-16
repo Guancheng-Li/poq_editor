@@ -54,6 +54,8 @@ set(PROJECT_SOURCES
     src/Core/JsonTemplate.cpp
     src/Core/GameModder.cpp
     src/Core/Characters.cpp
+    src/Core/SummonSteam.cpp
+    src/Core/Summon130.cpp
     src/Native/ProcessMemory.cpp
 )
 
@@ -65,6 +67,8 @@ set(PROJECT_HEADERS
     src/Core/JsonTemplate.h
     src/Core/GameModder.h
     src/Core/Characters.h
+    src/Core/SummonSteam.h
+    src/Core/Summon130.h
     src/Native/ProcessMemory.h
 )
 
