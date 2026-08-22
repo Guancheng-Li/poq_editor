@@ -25,6 +25,12 @@ struct ModuleInfo {
     uint32_t size = 0;
 };
 
+/// One committed, readable memory region of the target process.
+struct RegionInfo {
+    uintptr_t base = 0;
+    size_t size = 0;
+};
+
 /// Win32 process-memory read/write wrapper. Mirrors the Python `ProcessMemory` class.
 /// All addresses are 64-bit-capable (`uintptr_t`) so a 64-bit editor can poke a
 /// 32-bit game process.
@@ -53,12 +59,21 @@ public:
     /// Returns nullopt if not found.
     static std::optional<uintptr_t> FindModuleBase(unsigned int pid, const std::string& name);
 
+    /// Find a module's full path (W->UTF-8) by name (case-insensitive basename
+    /// match). Returns nullopt if not found.
+    static std::optional<std::string> FindModulePath(unsigned int pid, const std::string& name);
+
     /// Open the process with the given access mask. Returns true on success.
     /// Closes any previously-opened handle first.
     bool Open(unsigned int pid, unsigned int access = kProcessAllAccess);
 
     /// Close the current handle, if any.
     void Close();
+
+    /// Enumerate the target process's committed memory regions whose protection
+    /// allows reading (exact Protect in {1,2,4,0x20,0x40,0x80}, matching
+    /// memlib.py iter_regions). Scans 0..0x7FFFFFFF (32-bit target space).
+    std::vector<RegionInfo> EnumerateRegions();
 
     /// Read `n_size` bytes from `base_address`. Throws std::runtime_error on failure.
     std::vector<unsigned char> Read(uintptr_t base_address, int n_size);
@@ -105,6 +120,11 @@ public:
 
     /// Free memory previously allocated with Alloc (MEM_RELEASE).
     void Free(uintptr_t address);
+
+    /// Run `stub` in a remote thread and wait up to `wait_ms` milliseconds. On
+    /// completion, read the int32 at `result_slot` as the return value. Returns
+    /// nullopt on timeout (the thread is terminated) or if the read fails.
+    std::optional<int> CallRemoteThread(uintptr_t stub, int wait_ms, uintptr_t result_slot);
 
     /// Look up an exported function address (PE32) inside a target-process module.
     /// Returns 0 if the module/export is missing or the entry is a forwarder.

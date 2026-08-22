@@ -162,6 +162,34 @@ std::optional<uintptr_t> ProcessMemory::FindModuleBase(unsigned int pid,
     return std::nullopt;
 }
 
+std::optional<std::string> ProcessMemory::FindModulePath(unsigned int pid,
+                                                         const std::string& name) {
+    if (name.empty()) return std::nullopt;
+    std::string target = name;
+    size_t slash = target.find_last_of("/\\");
+    if (slash != std::string::npos) target = target.substr(slash + 1);
+    target = ToLower(target);
+    // 从 64 位进程枚举 32 位(WoW64)目标进程的模块时必须带 SNAPMODULE32。
+    HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == nullptr || snap == INVALID_HANDLE_VALUE) return std::nullopt;
+    MODULEENTRY32W me{};
+    me.dwSize = sizeof(me);
+    std::optional<std::string> out;
+    if (::Module32FirstW(snap, &me)) {
+        do {
+            std::string mn = WideToUtf8(me.szModule);
+            size_t s2 = mn.find_last_of("/\\");
+            if (s2 != std::string::npos) mn = mn.substr(s2 + 1);
+            if (ToLower(mn) == target) {
+                out = WideToUtf8(me.szExePath);
+                break;
+            }
+        } while (::Module32NextW(snap, &me));
+    }
+    ::CloseHandle(snap);
+    return out;
+}
+
 // ============================================================================
 // 打开/关闭
 // ============================================================================
@@ -177,6 +205,26 @@ void ProcessMemory::Close() {
         ::CloseHandle(handle_);
         handle_ = nullptr;
     }
+}
+
+std::vector<RegionInfo> ProcessMemory::EnumerateRegions() {
+    std::vector<RegionInfo> list;
+    if (!IsOpen()) return list;
+    uintptr_t addr = 0;
+    while (addr < 0x7FFFFFFF) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        SIZE_T n = ::VirtualQueryEx(handle_, reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi));
+        if (n == 0) break;
+        // Protect 精确比较(对齐 memlib.py iter_regions: 含 PAGE_NOACCESS 但读不到会跳过)
+        if (mbi.State == MEM_COMMIT &&
+            (mbi.Protect == 0x01 || mbi.Protect == 0x02 || mbi.Protect == 0x04 ||
+             mbi.Protect == 0x20 || mbi.Protect == 0x40 || mbi.Protect == 0x80)) {
+            list.push_back({reinterpret_cast<uintptr_t>(mbi.BaseAddress), mbi.RegionSize});
+        }
+        addr = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+        if (addr <= 0x10000) break;  // 防死循环(虚拟地址回绕)
+    }
+    return list;
 }
 
 // ============================================================================
@@ -348,6 +396,34 @@ uintptr_t ProcessMemory::Alloc(size_t size, uintptr_t near_addr) {
 void ProcessMemory::Free(uintptr_t address) {
     if (!IsOpen()) return;
     ::VirtualFreeEx(handle_, reinterpret_cast<LPVOID>(address), 0, MEM_RELEASE);
+}
+
+std::optional<int> ProcessMemory::CallRemoteThread(uintptr_t stub, int wait_ms,
+                                                   uintptr_t result_slot) {
+    if (!IsOpen()) return std::nullopt;
+    HANDLE h_thread = ::CreateRemoteThread(
+        handle_, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(stub), nullptr, 0, nullptr);
+    if (!h_thread) {
+        DWORD err = ::GetLastError();
+        throw std::runtime_error("CreateRemoteThread 失败: " + FormatWin32Error(err));
+    }
+    DWORD r = ::WaitForSingleObject(h_thread, static_cast<DWORD>(wait_ms));
+    std::optional<int> out;
+    if (r == WAIT_OBJECT_0) {
+        try {
+            out = ReadInt32(result_slot);
+        } catch (...) {
+            out = std::nullopt;
+        }
+    } else if (r == WAIT_TIMEOUT) {
+        // 命令可能挂住:终止线程,超时返回(游戏可能已不稳定)。
+        ::TerminateThread(h_thread, 0);
+        out = std::nullopt;
+    } else {
+        out = std::nullopt;
+    }
+    ::CloseHandle(h_thread);
+    return out;
 }
 
 uintptr_t ProcessMemory::FindExport(uintptr_t module_base, const std::string& name) {

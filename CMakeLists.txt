@@ -56,6 +56,7 @@ set(PROJECT_SOURCES
     src/Core/Characters.cpp
     src/Core/SummonSteam.cpp
     src/Core/Summon130.cpp
+    src/Core/GmCmd.cpp
     src/Native/ProcessMemory.cpp
 )
 
@@ -69,6 +70,7 @@ set(PROJECT_HEADERS
     src/Core/Characters.h
     src/Core/SummonSteam.h
     src/Core/Summon130.h
+    src/Core/GmCmd.h
     src/Native/ProcessMemory.h
 )
 

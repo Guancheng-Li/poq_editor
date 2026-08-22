@@ -53,6 +53,8 @@ set "MD5="
 for /f "skip=1 tokens=1" %%i in ('certutil -hashfile "%STAGE%\PoqEditor.exe" MD5') do if not defined MD5 set "MD5=%%i"
 > "%STAGE%\PoqEditor.exe.sig" echo %MD5%
 echo   [sig] PoqEditor.exe.sig = %MD5%
+copy /y "%ROOT%gm_cmd.txt" "%STAGE%\gm_cmd.txt" >nul || goto :err
+copy /y "%ROOT%gm_cmd.txt" "%BUILD%\gm_cmd.txt" >nul || goto :err
 del /q "%RELEASE%\PoqEditor.7z" 2>nul
 pushd "%RELEASE%"
 "%SZIP%" a -t7z -mx=9 PoqEditor.7z PoqEditor || (popd & goto :err)
@@ -62,7 +64,7 @@ echo.
 echo ============================================================
 echo  done.
 echo    exe:     %RELEASE%\PoqEditor.exe
-echo    folder:  %STAGE%\  (PoqEditor.exe + readme.txt)
+echo    folder:  %STAGE%\  (PoqEditor.exe + readme.txt + gm_cmd.txt)
 echo    release: %RELEASE%\PoqEditor.7z  (max-compressed, outermost=PoqEditor)
 echo    readme:  %BUILD%\readme.txt
 echo ============================================================
