@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <shobjidl.h>  // SetCurrentProcessExplicitAppUserModelID
+#include <shlobj.h>    // SHBrowseForFolderW(目录选择)
 #include <commdlg.h>
 
 #include <d3d11.h>
@@ -21,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <set>
@@ -74,6 +76,15 @@ std::string WideToUtf8(const std::wstring& w) {
     if (len <= 0) return "";
     std::string out(static_cast<size_t>(len), '\0');
     ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), &out[0], len, nullptr, nullptr);
+    return out;
+}
+
+std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return L"";
+    int len = ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    if (len <= 0) return L"";
+    std::wstring out(static_cast<size_t>(len), L'\0');
+    ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), &out[0], len);
     return out;
 }
 
@@ -345,6 +356,14 @@ struct App {
     bool gm_visible = false;          // GM tab 当前是否显示
     std::vector<std::pair<std::string, std::string>> gm_cmd_list;  // 常用命令 (命令, 显示名)
     int gm_cmdlist_sel = 0;           // 常用命令下拉当前选中项
+
+    // ---- H2解密(task10)----
+    std::wstring h2_path;             // 待转换文件(已有备份时等待用户选择)
+    bool h2_decrypt = true;           // 待转换方向: true=解密 false=加密
+    bool h2_wait_confirm = false;     // 已有备份,等待覆盖/跳过/取消选择
+    std::wstring h2_dir;              // 待批量转换目录(等待确认)
+    bool h2_dir_decrypt = true;       // 目录转换方向: true=解密 false=加密
+    bool h2_wait_dir_confirm = false; // 目录转换确认弹窗待定
 
     // ---- 状态 / 静态选项 ----
     bool hidden = true;  // F12 前隐藏调试 tab
@@ -2077,13 +2096,359 @@ void RenderGmTab(App& app) {
     }
 }
 
+// ============================================================================
+// H2 加解密(task10): H2 数据文件原地加解密。
+//   加密态: 首字节 0x80, 其余所有字节 ^0x78; 明文: GBK 编码, tab 分隔 csv。
+//   解密: 首字节 0x80 则去掉后其余 ^0x78; 加密: 全部 ^0x78 后开头补 0x80。
+//   转换前先备份原文件为 "<原名>.dec.bak"(解密) / "<原名>.enc.bak"(加密)。
+// ============================================================================
+const char* kH2Tip =
+    "使用说明：\n"
+    "H2加解密工具：\n"
+    "1. 在“游戏目录\\Data\\”存放加密过的游戏参数，例如物品爆率等；\n"
+    "2. 解密后的文件是GBK编码，请使用Excel打开、编辑、保存；\n"
+    "3. 解密过的文件将不再出现乱码，修改请参考照论坛或者其他教程；\n"
+    "4. 需要退出游戏重新进入后生效（存档+读档未确定）；\n"
+    "4. 程序在解密和加密前会在原目录备份文件并加上“.dec.bak”或“.env.bak”后缀，该错了可手动恢复；";
+
+std::wstring H2BackupPath(const std::wstring& path, bool decrypt) {
+    return path + (decrypt ? L".dec.bak" : L".enc.bak");
+}
+
+// 解密:首字节 0x80 则去掉后其余 ^0x78;否则视为已明文原样返回(python decrypt_bytes 同语义)。
+std::vector<unsigned char> H2DecryptBytes(const std::vector<unsigned char>& d) {
+    if (d.size() < 1 || d[0] != 0x80) return d;
+    std::vector<unsigned char> out;
+    out.reserve(d.size() - 1);
+    for (size_t i = 1; i < d.size(); ++i)
+        out.push_back(static_cast<unsigned char>(d[i] ^ 0x78));
+    return out;
+}
+// 加密:全部 ^0x78 后开头补 0x80。
+std::vector<unsigned char> H2EncryptBytes(const std::vector<unsigned char>& d) {
+    std::vector<unsigned char> out;
+    out.reserve(d.size() + 1);
+    out.push_back(0x80);
+    for (unsigned char c : d) out.push_back(static_cast<unsigned char>(c ^ 0x78));
+    return out;
+}
+
+// 读取整个文件;失败返回 false。
+bool H2ReadFile(const std::wstring& path, std::vector<unsigned char>& out) {
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) return false;
+    unsigned char buf[65536];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.insert(out.end(), buf, buf + n);
+    fclose(f);
+    return true;
+}
+
+// 磁盘备份原文件(src -> dst,已存在则覆盖)。
+bool H2CopyFile(const std::wstring& src, const std::wstring& dst) {
+    return ::CopyFileW(src.c_str(), dst.c_str(), /*bFailIfExists=*/FALSE) != 0;
+}
+
+// 原地转换: 读原文件 -> 内存转换 -> 写同目录临时文件 -> MoveFileEx 原子替换原文件。
+// 任意一步失败都保证原文件未更改(只读原文件,替换失败只删临时文件)。
+bool H2ConvertFile(const std::wstring& path, bool decrypt) {
+    std::vector<unsigned char> raw;
+    if (!H2ReadFile(path, raw)) return false;
+    std::vector<unsigned char> out = decrypt ? H2DecryptBytes(raw) : H2EncryptBytes(raw);
+    std::wstring tmp = path + L".h2tmp";
+    FILE* f = _wfopen(tmp.c_str(), L"wb");
+    if (!f) return false;
+    bool wrote_ok = out.empty() || fwrite(out.data(), 1, out.size(), f) == out.size();
+    fclose(f);
+    if (!wrote_ok) {
+        _wremove(tmp.c_str());
+        return false;
+    }
+    if (!::MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        _wremove(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+// 执行转换(make_backup=true 时先备份原文件为 .dec/.enc.bak)。
+void H2DoConvert(App& app, const std::wstring& path, bool decrypt, bool make_backup) {
+    if (make_backup) {
+        if (!H2CopyFile(path, H2BackupPath(path, decrypt))) {
+            MsgBox("转换失败", "备份文件创建失败，文件未更改，请检查文件", MB_ICONERROR);
+            return;
+        }
+    }
+    if (!H2ConvertFile(path, decrypt)) {
+        MsgBox("转换失败", "转换失败，文件未更改，请检查文件", MB_ICONERROR);
+        return;
+    }
+    const char* ok = decrypt ? "解密成功，请用Excel编辑属性" : "加密成功，文件已恢复到乱码状态";
+    MsgBox("转换成功", ok, MB_ICONINFORMATION);
+    app.SetStatus(decrypt ? "H2 解密成功" : "H2 加密成功");
+}
+
+// 文件选择框初始目录:已连接/枚举到 poq.exe 时用其所在目录,否则工具所在目录。
+std::wstring H2InitialDir(App& app) {
+    std::optional<unsigned int> pid;
+    if (app.modder.Mem().IsOpen())
+        pid = app.modder.Pid();
+    else if (auto s = TryGetSelectedPid(app))
+        pid = s;
+    if (!pid) pid = FindPoqPid(app);
+    if (pid) {
+        auto path = poq::ProcessMemory::FindModulePath(*pid, "POQ.exe");
+        if (path) {
+            std::string p = *path;
+            size_t pos = p.find_last_of("/\\");
+            if (pos != std::string::npos) {
+                std::wstring dir = Utf8ToWide(p.substr(0, pos));
+                if (!dir.empty() && ::GetFileAttributesW(dir.c_str()) != INVALID_FILE_ATTRIBUTES)
+                    return dir;
+            }
+        }
+    }
+    return AppDirW();
+}
+
+// 选择文件后的统一入口:有备份 -> 弹三选一;否则直接转换。
+void H2BeginConvert(App& app, const std::wstring& path, bool decrypt) {
+    std::wstring bak = H2BackupPath(path, decrypt);
+    if (::GetFileAttributesW(bak.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        app.h2_path = path;
+        app.h2_decrypt = decrypt;
+        app.h2_wait_confirm = true;
+        return;
+    }
+    H2DoConvert(app, path, decrypt, /*make_backup=*/true);
+}
+
+// 点击解密/加密按钮:弹文件选择框,选好即转换。
+void H2OnConvert(App& app, bool decrypt) {
+    std::string sel = OpenFileDialog(H2InitialDir(app), L"所有文件 (*)\0*.*\0\0");
+    if (sel.empty()) return;  // 用户取消
+    H2BeginConvert(app, Utf8ToWide(sel), decrypt);
+}
+
+// 已有备份文件的三选一弹窗(覆盖备份转换 / 跳过备份转换 / 取消转换)。
+void H2RenderBackupConfirm(App& app) {
+    const char* popup_id = "备份已存在##h2bak";
+    if (!ImGui::IsPopupOpen(popup_id)) ImGui::OpenPopup(popup_id);
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal(popup_id, nullptr,
+                               ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoCollapse)) {
+        const float win_w = ImGui::GetWindowSize().x;
+        ImGui::PushTextWrapPos(win_w - 40.0f);
+        ImGui::TextUnformatted("已存在备份文件，请选择：");
+        ImGui::TextUnformatted(WideToUtf8(H2BackupPath(app.h2_path, app.h2_decrypt)).c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 14));
+        const float btn_w = 150.0f;
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        const float total = btn_w * 3.0f + spacing * 2.0f;
+        ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - total) * 0.5f);
+        if (ImGui::Button("覆盖备份转换", ImVec2(btn_w, 0))) {
+            H2DoConvert(app, app.h2_path, app.h2_decrypt, /*make_backup=*/true);
+            app.h2_wait_confirm = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("跳过备份转换", ImVec2(btn_w, 0))) {
+            H2DoConvert(app, app.h2_path, app.h2_decrypt, /*make_backup=*/false);
+            app.h2_wait_confirm = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("取消转换", ImVec2(btn_w, 0))) {
+            app.h2_wait_confirm = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+// 目录选择回调:设置初始选中目录。
+static int CALLBACK H2BrowseCallback(HWND hwnd, UINT uMsg, LPARAM lParam, LPARAM lpData) {
+    if (uMsg == BFFM_INITIALIZED && lpData)
+        ::SendMessageW(hwnd, BFFM_SETSELECTIONW, TRUE, lpData);  // lpData = 初始目录宽串
+    return 0;
+}
+
+// 目录选择框(SHBrowseForFolderW,自带 COM 处理,无需预初始化)。
+std::wstring H2PickFolderDialog(const std::wstring& dir) {
+    wchar_t disp[MAX_PATH]{};
+    BROWSEINFOW bi{};
+    bi.hwndOwner = nullptr;
+    bi.pidlRoot = nullptr;
+    bi.pszDisplayName = disp;
+    bi.lpszTitle = L"选择要批量加解密的目录";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    bi.lpfn = H2BrowseCallback;
+    bi.lParam = reinterpret_cast<LPARAM>(dir.c_str());
+    PIDLIST_ABSOLUTE pidl = ::SHBrowseForFolderW(&bi);
+    if (!pidl) return L"";  // 用户取消
+    wchar_t path[MAX_PATH]{};
+    bool ok = ::SHGetPathFromIDListW(pidl, path) != FALSE;
+    ::CoTaskMemFree(pidl);
+    if (!ok) return L"";
+    std::wstring s(path);
+    while (s.size() > 3 && s.back() == L'\\') s.pop_back();  // 去末尾反斜杠(根目录除外)
+    return s;
+}
+
+// 批量结果统计。
+struct H2BatchResult {
+    int ok = 0;       // 成功转换
+    int skipped = 0;  // 跳过(方向已不符)
+    int failed = 0;   // 失败(原文件未更改)
+};
+
+// 批量转换:递归目录(含子文件夹)内所有 .txt 文件。每个文件独立备份(已有备份则覆盖)。
+// 解密只处理加密态(0x80 开头)文件,加密只处理明文文件,避免重复转换破坏数据。
+H2BatchResult H2BatchConvert(const std::wstring& dir, bool decrypt) {
+    H2BatchResult r;
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator it(
+        dir, std::filesystem::directory_options::skip_permission_denied, ec);
+    std::filesystem::recursive_directory_iterator end;
+    for (; !ec && it != end; it.increment(ec)) {
+        const std::filesystem::path& p = it->path();
+        if (!it->is_regular_file(ec)) continue;
+        if (_wcsicmp(p.extension().c_str(), L".txt") != 0) continue;  // 仅 txt 文件
+        std::wstring wp = p.wstring();
+        std::vector<unsigned char> raw;
+        if (!H2ReadFile(wp, raw)) { r.failed++; continue; }
+        bool is_enc = !raw.empty() && raw[0] == 0x80;
+        if (decrypt ? !is_enc : is_enc) { r.skipped++; continue; }  // 方向不符,跳过
+        if (!H2CopyFile(wp, H2BackupPath(wp, decrypt))) { r.failed++; continue; }
+        if (!H2ConvertFile(wp, decrypt)) { r.failed++; continue; }
+        r.ok++;
+    }
+    return r;
+}
+
+// 目录转换确认后执行,结果弹统计。
+void H2RunBatch(App& app, const std::wstring& dir, bool decrypt) {
+    H2BatchResult r = H2BatchConvert(dir, decrypt);
+    std::string msg = (decrypt ? "解密" : "加密") + std::to_string(r.ok) + " 个文件";
+    if (r.skipped > 0) msg += "，跳过 " + std::to_string(r.skipped) + " 个";
+    if (r.failed > 0) msg += "，失败 " + std::to_string(r.failed) + " 个（原文件未更改）";
+    if (r.failed > 0)
+        MsgBox("目录转换", msg + "。", MB_ICONWARNING);
+    else
+        MsgBox("目录转换", msg + "。", MB_ICONINFORMATION);
+    app.SetStatus((decrypt ? "H2 目录解密：" : "H2 目录加密：") + msg);
+}
+
+// 目录按钮点击:弹目录选择框,选好进确认弹窗。
+void H2OnBatch(App& app, bool decrypt) {
+    std::wstring dir = H2PickFolderDialog(H2InitialDir(app));
+    if (dir.empty()) return;  // 用户取消
+    app.h2_dir = dir;
+    app.h2_dir_decrypt = decrypt;
+    app.h2_wait_dir_confirm = true;
+}
+
+// 目录转换确认弹窗(提示会转换整个目录含子文件夹的 txt 文件,请做好备份)。
+void H2RenderDirConfirm(App& app) {
+    const char* popup_id = "目录转换确认##h2dir";
+    if (!ImGui::IsPopupOpen(popup_id)) ImGui::OpenPopup(popup_id);
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal(popup_id, nullptr,
+                               ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoCollapse)) {
+        const float win_w = ImGui::GetWindowSize().x;
+        ImGui::PushTextWrapPos(win_w - 40.0f);
+        ImGui::TextUnformatted("将会转换整个目录（包括子文件夹）中的 txt 文件，请做好备份！");
+        ImGui::TextUnformatted(
+            app.h2_dir_decrypt ? "已是明文（解密态）的文件将自动跳过。"
+                               : "已是加密态的文件将自动跳过。");
+        ImGui::TextWrapped("目录：%s", WideToUtf8(app.h2_dir).c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 14));
+        const float btn_w = 140.0f;
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        const float total = btn_w * 2.0f + spacing;
+        ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - total) * 0.5f);
+        if (ImGui::Button("开始转换", ImVec2(btn_w, 0))) {
+            H2RunBatch(app, app.h2_dir, app.h2_dir_decrypt);
+            app.h2_wait_dir_confirm = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("取消", ImVec2(btn_w, 0))) {
+            app.h2_wait_dir_confirm = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+// H2解密 tab 主渲染(对齐 GM tab 顶部说明样式)。
+void RenderH2Tab(App& app) {
+    const float avail_w = ImGui::GetContentRegionAvail().x;
+    ImGui::PushTextWrapPos(avail_w - 10.0f);
+    ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.15f, 1.0f), "%s", kH2Tip);
+    ImGui::PopTextWrapPos();
+    ImGui::Separator();
+
+    const float btn_w =
+        ImGui::CalcTextSize("解密目录").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    ImGui::TextDisabled("单个文件：");
+    if (ImGui::Button("解密", ImVec2(btn_w, 0))) H2OnConvert(app, /*decrypt=*/true);
+    ImGui::SameLine();
+    if (ImGui::Button("加密", ImVec2(btn_w, 0))) H2OnConvert(app, /*decrypt=*/false);
+    ImGui::TextDisabled("整个目录（含子文件夹）：");
+    if (ImGui::Button("解密目录", ImVec2(btn_w, 0))) H2OnBatch(app, /*decrypt=*/true);
+    ImGui::SameLine();
+    if (ImGui::Button("加密目录", ImVec2(btn_w, 0))) H2OnBatch(app, /*decrypt=*/false);
+
+    // 已有备份 -> 三选一弹窗
+    if (app.h2_wait_confirm) H2RenderBackupConfirm(app);
+    // 目录确认 -> 二选弹窗
+    if (app.h2_wait_dir_confirm) H2RenderDirConfirm(app);
+}
+
+// ============================================================================
+// 版本号:日期部分从编译期 __DATE__("Mmm dd yyyy")生成 YYMMDD,每次编译自动取当天;
+// 后缀 "v1"(或 v2/v3...)为手动版本号,由用户指定后改这里。
+// 启动弹窗显示形如 "Ver: 260826v1"。
+// ============================================================================
+constexpr int kVerMonth() {
+    constexpr const char* names[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    int m = 1;
+    for (int i = 0; i < 12; ++i) {
+        bool eq = true;
+        for (int j = 0; j < 3; ++j)
+            if (__DATE__[j] != names[i][j]) { eq = false; break; }
+        if (eq) { m = i + 1; break; }
+    }
+    return m;
+}
+constexpr int kVerYear2() { return (__DATE__[9] - '0') * 10 + (__DATE__[10] - '0'); }
+constexpr int kVerDay() {
+    int d10 = (__DATE__[4] == ' ') ? 0 : (__DATE__[4] - '0');
+    return d10 * 10 + (__DATE__[5] - '0');
+}
+const char* kVersionText() {
+    static char buf[32];
+    std::snprintf(buf, sizeof(buf), "Ver: %02d%02d%02dv1", kVerYear2(), kVerMonth(), kVerDay());
+    return buf;
+}
+
 void RenderWelcomeDialog(App& app) {
     // 每次启动显示的免责声明弹窗:居中,底部中间"确认"关闭。
     if (!app.show_welcome) return;
     if (!ImGui::IsPopupOpen("关于")) ImGui::OpenPopup("关于");
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(440, 240), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(440, 280), ImGuiCond_Appearing);
     if (ImGui::BeginPopupModal("关于", nullptr,
                                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
                                    ImGuiWindowFlags_NoCollapse)) {
@@ -2096,7 +2461,7 @@ void RenderWelcomeDialog(App& app) {
             "鸣谢：B站up口花生口",
         };
         // 文本区(四行)居中显示,垂直大致居中
-        float y = win_h * 0.16f;
+        float y = win_h * 0.14f;
         const float line_h = ImGui::GetTextLineHeightWithSpacing();
         for (const char* line : kLines) {
             float tw = ImGui::CalcTextSize(line).x;
@@ -2104,6 +2469,12 @@ void RenderWelcomeDialog(App& app) {
             ImGui::TextUnformatted(line);
             y += line_h;
         }
+        // 版本行:与上方内容空一行区分,同样居中(日期由编译期 __DATE__ 自动取当天)
+        y += line_h;  // 空一行
+        const char* ver = kVersionText();
+        float tw = ImGui::CalcTextSize(ver).x;
+        ImGui::SetCursorPos(ImVec2((win_w - tw) * 0.5f, y));
+        ImGui::TextUnformatted(ver);
         // 底部中间"确认"按钮
         const float btn_w = 120.0f;
         const float btn_h = 30.0f;
@@ -2402,7 +2773,7 @@ void RenderMainWindow(App& app) {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
-    ImGui::Begin("秦殇内存修改器", nullptr,
+    ImGui::Begin("秦殇修改器", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
                      ImGuiWindowFlags_NoSavedSettings);
@@ -2437,6 +2808,10 @@ void RenderMainWindow(App& app) {
         }
         if (ImGui::BeginTabItem("GM命令")) {
             RenderGmTab(app);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("H2解密")) {
+            RenderH2Tab(app);
             ImGui::EndTabItem();
         }
         if (!app.hidden && ImGui::BeginTabItem("内存查看")) {
@@ -2609,7 +2984,7 @@ int RunApp(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                       hIcon, nullptr, nullptr, nullptr, L"PoqEditorImgui", nullptr};
     wc.hIconSm = hIcon;
     ::RegisterClassExW(&wc);
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"秦殇内存修改器",
+    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"秦殇修改器",
                                 WS_OVERLAPPEDWINDOW, 100, 100,
                                 (int)(1100 * main_scale), (int)(720 * main_scale),
                                 nullptr, nullptr, wc.hInstance, nullptr);
