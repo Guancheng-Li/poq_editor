@@ -78,24 +78,16 @@ struct BasicFieldCfg {
 struct AttrListCfg {
     uint32_t head_offset = 0x45C;        // 头指针位于 物品基址 + head_offset
     uint32_t next_offset = 0x00;
-    uint32_t prev_offset = 0x04;         // 前驱指针(双向链表)
+    uint32_t prev_offset = 0x04;         // 前驱指针(原生链表 prev 全 0,新增节点也写 0)
     uint32_t sentinel_offset = 0x08;     // 有效节点哨兵(=0xFFFFFFFF)
     uint32_t node_flag_offset = 0x10;    // 启用颜色标志(=1)
     uint32_t id_offset = 0x0C;
     uint32_t color_offset = 0x14;
     uint32_t precent_offset = 0x1C;
     uint32_t value_offset = 0x20;
-    uint32_t node_size = 0x28;           // 单个节点数据区大小
-    uint32_t max_nodes = 30;             // 遍历/写入上限,防止坏链表死循环
-    // 节点池:新增节点时从池里按 static_slot 一个槽从顶部向下分配。
-    //   pool_type="static"(固定静态区,原版修改器实测):游戏静态零缓冲,不会 free,可安全复用。
-    //   pool_type="dynamic"(steam 版,对齐 web.ct):VirtualAllocEx 动态分配,
-    //     游戏不认识这块内存、不会 free,地址每次运行时总是有效。
-    // GameModder 按 pool_type 分发(_pool_cfg 返回 (base,size)),无 if-else。
-    uint32_t static_base = 0x00901000;   // 池区起始地址(pool_type=dynamic 时忽略)
-    uint32_t static_size = 0x1000;       // 池区大小(dynamic 时至少保证 30 槽)
-    uint32_t static_slot = 0x30;         // 每个槽位间隔字节
-    std::string pool_type = "static";    // "static"(固定区)| "dynamic"(VirtualAllocEx 分配)
+    // 新增节点槽:编辑器自管理的节点池(VirtualAllocEx,游戏不认识、不会 free)。
+    // 槽位间隔 slot_size 对齐真实节点大小(web.ct 模板实证 0x40 一个)。
+    uint32_t slot_size = 0x40;           // 每个槽位间隔字节
 };
 
 /// 一种版本下的全部偏移(对应 Python 的 ModeCfg)。

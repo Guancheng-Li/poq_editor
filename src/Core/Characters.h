@@ -48,8 +48,9 @@ struct CharFieldCfg {
     std::optional<std::string> hint;
 };
 
-// 5 个角色(姓名用于按名定位;显示顺序)。
-const std::vector<std::string>& MemberNames();
+// 全部可选队友白名单(名字 -> 职业显示名,共 16 人;定位时槽内名字必须命中)。
+// 下拉显示格式 = "职业-名字"(如 刺客-荆无忌)。
+const std::map<std::string, std::string>& KnownMembers();
 
 // 全局字段(5 人共享;金额位置待确认)。
 const std::vector<CharFieldCfg>& GlobalFields();
@@ -68,7 +69,13 @@ const std::map<std::string, std::map<std::string, uint32_t>>& MemberOffsets();
 // 等级 1-99、生命/精气合理)。返回 [(姓名, 结构体地址), ...] 按槽位顺序,
 // 结构体 = EDI + 0x28。用 vector 而非 map 以保留槽位顺序(对齐 Python dict)。
 std::vector<std::pair<std::string, uintptr_t>> LocateByOffsets(ProcessMemory& mem, unsigned int pid,
-                                                  const std::string& module);
+                                                  const std::string& module,
+                                                  bool strict_filter = true);
+
+// 调试辅助:不放过滤地按槽位顺序读每个槽的名字(读失败记为占位符)。
+// 用于 F12 调试验证"哪个槽扫不出来、哪个名字被白名单挡掉"(带 ⚠ 标记)。
+std::vector<std::string> ProbeSlotNames(ProcessMemory& mem, unsigned int pid,
+                                        const std::string& module);
 
 // 字段值(读写共用)。pair 用 (lo,hi);string_ptr 用 str;其余用 lo。
 struct CharValue {

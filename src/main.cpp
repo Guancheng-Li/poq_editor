@@ -5,7 +5,7 @@
 //
 // 结构:
 //   WinMain(入口,无控制台窗口) -> D3D11 初始化 -> imgui 初始化 -> 主循环
-//   主循环每帧渲染:进程栏 / TabBar(物品修改、内存查看、偏移设置,F12 切换隐藏) / 状态栏
+//   主循环每帧渲染:进程栏 / TabBar(物品修改、内存查看、偏移设置、gam修改,F12 切换隐藏) / 状态栏
 //   App 结构持有全部状态;GameModder/ProcessMemory 等核心逻辑与 cpp 版完全一致。
 
 #include <windows.h>
@@ -44,6 +44,8 @@
 #include "Core/SummonSteam.h"
 #include "Core/Summon130.h"
 #include "Core/GmCmd.h"
+#include "Core/GamFile.h"
+#include "Core/GamCatalog.h"
 #include "Native/ProcessMemory.h"
 
 // imgui_impl_win32.h 用 #if 0 注释掉了这个声明(避免拖入 windows.h 依赖),
@@ -290,6 +292,18 @@ struct App {
     std::vector<ItemProperty> attrs;
     std::vector<bool> attr_sel;
 
+    // ---- 上一件物品属性缓存 ----
+    // 每次读取(或保存)成功时快照一份;"复制上一件物品"把它写到当前物品上。
+    std::vector<ItemProperty> last_attrs;
+    uintptr_t last_item_base = 0;
+
+    // ---- 使用说明弹窗 ----
+    // cur_tab:当前主 tab 下标(0=人物 1=道具 2=召唤 3=GM 4=H2,5/6=调试 tab);
+    // help_jump/help_tab:点"使用说明"瞬间要跳到的 tab(仅弹窗打开后第一帧生效)。
+    int cur_tab = 0;
+    int help_tab = 0;
+    bool help_jump = false;
+
     // ---- 进程栏 ----
     int proc_selected = -1;
 
@@ -313,8 +327,6 @@ struct App {
     char cfg_color[32] = {0};
     char cfg_precent[32] = {0};
     char cfg_value[32] = {0};
-    char cfg_node_size[32] = {0};
-    char cfg_max_nodes[32] = {0};
 
     // ---- 属性修改(角色)----
     std::map<std::string, uintptr_t> char_addrs;   // 姓名 -> 结构体地址
@@ -329,6 +341,9 @@ struct App {
     std::map<std::string, std::map<std::string, CharValue>> hit_cache;  // 攻击/命中率
     float lock_accum = 0.0f;                       // 锁定时器累加(500ms 写回一次)
     std::string char_status;                       // 角色 tab 状态文本
+    std::vector<std::string> char_slot_probe;      // F12 调试:槽位名字探测(不过滤)
+    bool char_filter = true;                       // 角色属性校验过滤(白名单+等级),默认开启
+    bool char_filter_warn = false;                 // 关闭过滤时的警告弹窗待显示
 
     // ---- 召唤修改(task7)----
     bool summon_active = false;       // 激活态(激活后按钮变"取消",刷新可点)
@@ -356,6 +371,11 @@ struct App {
     bool gm_visible = false;          // GM tab 当前是否显示
     std::vector<std::pair<std::string, std::string>> gm_cmd_list;  // 常用命令 (命令, 显示名)
     int gm_cmdlist_sel = 0;           // 常用命令下拉当前选中项
+    // 命令历史(上下箭头切换):最新在末尾,最多 30 条;idx=-1 表示未在浏览。
+    std::vector<std::string> gm_history;
+    int gm_hist_idx = -1;
+    std::string gm_hist_draft;        // 开始浏览瞬间保存的输入框原文(下翻回最末时还原)
+    bool gm_cmdlist_focused = false;  // 常用命令列表当前是否持有焦点(持有时箭头留给列表)
 
     // ---- H2解密(task10)----
     std::wstring h2_path;             // 待转换文件(已有备份时等待用户选择)
@@ -364,6 +384,33 @@ struct App {
     std::wstring h2_dir;              // 待批量转换目录(等待确认)
     bool h2_dir_decrypt = true;       // 目录转换方向: true=解密 false=加密
     bool h2_wait_dir_confirm = false; // 目录转换确认弹窗待定
+
+    // ---- GAM修改(task13)----
+    poq::GamFile gam_file;                   // 已加载存档
+    std::string gam_path;
+    bool gam_loaded = false;
+    int gam_sel_container = -1;              // 容器下标
+    int gam_sel_item = -1;                   // 选中物品下标(gam_file.items)
+    int gam_edit_loaded_item = -1;           // 词条编辑缓冲已加载的物品下标
+    std::vector<uint8_t> gam_clip_record;    // 复制物品(整条记录字节)
+    bool gam_has_record = false;
+    std::map<std::string, int64_t> gam_clip_fields;  // 复制属性(固定字段快照)
+    std::string gam_clip_ginfo;              // 复制属性(G_Info GBK 文本,空=无)
+    bool gam_has_attrs = false;
+    poq::GamCatalog gam_catalog;             // 无中生有数据源(全装备目录)
+    bool gam_cat_loaded = false;
+    int gam_sel_cat = 0;                     // 创建物品: 类别
+    int gam_sel_cat_item = 0;                // 创建物品: 条目
+    std::vector<std::pair<int, std::vector<uint8_t>>> gam_added;  // 保存时插入(容器,记录)
+    std::string gam_last_dir;               // 上次打开 gam 的目录(记忆)
+    poq::SceneCatalog gam_scene_cat;        // 场景全名目录(容器别名->完整场景路径)
+    bool gam_scene_loaded = false;
+    poq::ItemNames gam_item_names;         // 物品中文名(别名->中文)
+    bool gam_item_names_loaded = false;
+    char gam_ginfo_buf[32768] = {0};         // 词条文本编辑缓冲(UTF-8)
+    bool gam_ginfo_pending = false;          // 词条已改待保存
+    std::vector<poq::GamItem::GInfoRow> gam_grows;  // 当前物品词条(编辑用, 隐藏头行)
+    std::string gam_gheader;                  // 当前物品词条头行(GBK, 保存时装配回)
 
     // ---- 状态 / 静态选项 ----
     bool hidden = true;  // F12 前隐藏调试 tab
@@ -381,6 +428,25 @@ struct App {
         RefreshProcesses();
         ReloadCfgBuffers();
         std::snprintf(gm_count_buf, sizeof(gm_count_buf), "1");  // 执行次数默认 1
+        // 无中生有物品目录: exe 目录 / data 子目录 / 开发目录 ../../data(全装备解析产物)
+        if (gam_catalog.Load({ WideToUtf8(AppDirW() + L"\\gam_catalog.bin"),
+                               WideToUtf8(AppDirW() + L"\\data\\gam_catalog.bin"),
+                               WideToUtf8(AppDirW() + L"\\..\\..\\data\\gam_catalog.bin") },
+                             gam_catalog)) {
+            gam_cat_loaded = true;
+        }
+        if (gam_scene_cat.Load({ WideToUtf8(AppDirW() + L"\\scene_catalog.bin"),
+                                 WideToUtf8(AppDirW() + L"\\data\\scene_catalog.bin"),
+                                 WideToUtf8(AppDirW() + L"\\..\\..\\data\\scene_catalog.bin") },
+                               gam_scene_cat)) {
+            gam_scene_loaded = true;
+        }
+        if (gam_item_names.Load({ WideToUtf8(AppDirW() + L"\\item_names.bin"),
+                                  WideToUtf8(AppDirW() + L"\\data\\item_names.bin"),
+                                  WideToUtf8(AppDirW() + L"\\..\\..\\data\\item_names.bin") },
+                                gam_item_names)) {
+            gam_item_names_loaded = true;
+        }
         status = "就绪。请以管理员身份运行,初始化后在游戏中拾起物品。";
     }
 
@@ -431,8 +497,6 @@ struct App {
         std::snprintf(cfg_color, sizeof(cfg_color), "%s", HexStr(al.color_offset).c_str());
         std::snprintf(cfg_precent, sizeof(cfg_precent), "%s", HexStr(al.precent_offset).c_str());
         std::snprintf(cfg_value, sizeof(cfg_value), "%s", HexStr(al.value_offset).c_str());
-        std::snprintf(cfg_node_size, sizeof(cfg_node_size), "%s", HexStr(al.node_size).c_str());
-        std::snprintf(cfg_max_nodes, sizeof(cfg_max_nodes), "%u", al.max_nodes);
     }
 
     // 当前"类型"字段值(enum 取 enum_val,否则 intval)
@@ -497,10 +561,14 @@ void OnInit(App& app) {
         std::snprintf(app.raw_addr, sizeof(app.raw_addr), "0x%s", Hex8(slot).c_str());
         const bool dbg = !app.hidden;
         std::string prefix = restarted ? "检测到游戏重启,已自动重新选择进程。" : "";
+        const bool injected = app.modder.IsInjected();
         if (dbg) {
             std::string base_info = "hook模块=" + app.cfg.Current().hook.module + " hook@0x" +
                                     Hex8(app.modder.HookAddr()) + " cur_item槽=0x" + Hex8(slot);
-            if (ptr == 0 || ptr == 0xFFFFFFFF) {
+            if (!injected) {
+                app.SetStatus(prefix + "初始化成功(注入失败,道具修改不可用)。请重新初始化。" +
+                              base_info);
+            } else if (ptr == 0 || ptr == 0xFFFFFFFF) {
                 app.SetStatus(prefix +
                               "初始化成功(已注入)。当前无手持物品,请在游戏中拾起物品后点\"读取属性\"。" +
                               base_info);
@@ -509,7 +577,10 @@ void OnInit(App& app) {
                               base_info);
             }
         } else {
-            if (ptr == 0 || ptr == 0xFFFFFFFF) {
+            if (!injected) {
+                app.SetStatus(prefix +
+                              "初始化成功(注入失败,道具修改不可用)。请重新初始化。");
+            } else if (ptr == 0 || ptr == 0xFFFFFFFF) {
                 app.SetStatus(prefix +
                               "初始化成功(已注入)。当前无手持物品,请在游戏中拾起物品后点\"读取属性\"。");
             } else {
@@ -568,6 +639,8 @@ void OnRead(App& app) {
         FillBasic(app, app.modder.ReadBasicFields(ib));
         app.attrs = app.modder.ReadAttributes(ib);
         app.attr_sel.assign(app.attrs.size(), false);
+        app.last_attrs = app.attrs;  // 快照:供"复制上一件物品"用
+        app.last_item_base = ib;
         if (!app.hidden) {
             app.SetStatus("读取完成。物品基址 = 0x" + Hex8(ib) + ",属性 " +
                           std::to_string(app.attrs.size()) + " 条。");
@@ -594,14 +667,17 @@ void OnSave(App& app) {
         auto written_skipped = app.modder.WriteAttributes(ib, props);
         int written = written_skipped.first;
         int skipped = written_skipped.second;
+        // 保存成功后刷新快照(含用户编辑后的值),供"复制上一件物品"用。
+        app.last_attrs = props;
+        app.last_item_base = ib;
         std::string msg = "保存完成:基础属性 " + std::to_string(bs.ints.size() + bs.strs.size()) +
                           " 项,属性 " + std::to_string(written) + " 条已写入。";
         if (skipped > 0) {
-            msg += "(" + std::to_string(skipped) + " 条新增属性因静态节点池无空闲槽被跳过)";
+            msg += "(" + std::to_string(skipped) + " 条新增属性因节点池无空闲槽被跳过)";
             MsgBox("部分属性未写入",
                    "有 " + std::to_string(skipped) +
-                       " 条新增属性因静态节点池无空闲槽被跳过。\n"
-                       "可在偏移配置(F12)中调大 attr_list.static_size,或在游戏里换个物品试试。\n"
+                       " 条新增属性因节点池无空闲槽被跳过。\n"
+                       "若刚丢弃过武器或读档过,可点击\"重置节点池\"回收全部槽位后重试。\n"
                        "已写入的属性不受影响。",
                    MB_ICONWARNING);
         }
@@ -614,6 +690,43 @@ void OnSave(App& app) {
         std::string msg = Sanitize(ex.what(), !app.hidden);
         MsgBox("保存失败", msg, MB_ICONERROR);
         app.SetStatus("保存失败:" + msg);
+    }
+}
+
+// 把缓存的上一件物品属性写到当前物品:
+// 现有节点原位覆盖(前 min(m,k) 条),多出来的词条从节点池分配接到链尾,
+// 少了则截断。不写基础属性(名字/耐久等各物品独立)。
+void OnCopyPrevItem(App& app) {
+    if (!app.modder.Mem().IsOpen()) {
+        app.SetStatus("请先点击\"初始化\"。");
+        return;
+    }
+    if (app.last_attrs.empty()) {
+        app.SetStatus("还没有读取过任何物品的属性,无法复制。");
+        return;
+    }
+    try {
+        uintptr_t ib = app.modder.GetItemBase();
+        auto written_skipped = app.modder.WriteAttributes(ib, app.last_attrs);
+        int written = written_skipped.first;
+        int skipped = written_skipped.second;
+        std::string msg = "已复制上一件物品的属性到当前物品:写入 " +
+                          std::to_string(written) + " 条。";
+        if (ib == app.last_item_base) {
+            msg += "(注意:当前物品就是缓存的那件)";
+        }
+        if (skipped > 0) {
+            msg += "(" + std::to_string(skipped) +
+                   " 条因节点池无空闲槽被跳过,可点\"重置节点池\"后重试)";
+        }
+        msg += "请在游戏中把物品扔到地上再捡起使修改生效。";
+        // 表格同步为已写入的内容,与内存一致
+        app.attrs = app.last_attrs;
+        app.attr_sel.assign(app.attrs.size(), false);
+        app.SetStatus(msg);
+    } catch (const std::exception& ex) {
+        std::string msg = Sanitize(ex.what(), !app.hidden);
+        app.SetStatus("复制失败:" + msg);
     }
 }
 
@@ -740,8 +853,6 @@ void OnSaveCfg(App& app) {
         al.color_offset = parse_hex(app.cfg_color);
         al.precent_offset = parse_hex(app.cfg_precent);
         al.value_offset = parse_hex(app.cfg_value);
-        al.node_size = parse_hex(app.cfg_node_size);
-        al.max_nodes = static_cast<uint32_t>(parse_dec("attr_list.max_nodes", app.cfg_max_nodes));
         app.cfg.SetCurrent(mid);
         // 单文件版:偏移只保存在内存中,不写配置文件(重启回到内置默认)。
         app.modder.Config() = app.cfg;
@@ -832,10 +943,15 @@ void OnCharRead(App& app) {
     }
     try {
         const std::string& module = app.cfg.Current().hook.module;  // steam/v1.30
-        auto located = LocateByOffsets(app.modder.Mem(), app.modder.Pid(), module);
+        auto located = LocateByOffsets(app.modder.Mem(), app.modder.Pid(), module,
+                                       app.char_filter);
+        if (app.hidden)
+            app.char_slot_probe.clear();
+        else
+            app.char_slot_probe = ProbeSlotNames(app.modder.Mem(), app.modder.Pid(), module);
         if (located.empty()) {
-            app.char_status = "未定位到队员(偏移可能失效)。";
-            app.SetStatus("未定位到任何队员。");
+            app.char_status = "未定位到队员(可尝试取消过滤后再次读取属性)。";
+            app.SetStatus("未定位到队员(可尝试取消过滤后再次读取属性)。");
             return;
         }
         app.char_addrs.clear();
@@ -1082,10 +1198,6 @@ int IndexOf(const std::vector<uint32_t>& ids, uint32_t v) {
 
 void RenderBasicFields(App& app) {
     auto type_val = app.CurrentTypeValue();
-    // 使用步骤提示:识别的物品是"上一次操作(选中后放下)的物品",不是光标物品
-    ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.15f, 1.0f),
-                       "使用步骤：第1步：选中箱子中的物品然后放下；第2步：读取属性并修改；第3步：丢弃修改物品再捡起，在箱子里查看修改后的属性；");
-    ImGui::Separator();
     const float avail = ImGui::GetContentRegionAvail().x;
     // 网格列数:正常宽度下武器名字/别名 2 列一行、其余 3 列一行;窗口窄时递减。
     const int cols = avail >= 900.0f ? 3 : (avail >= 600.0f ? 2 : 1);
@@ -1197,6 +1309,31 @@ void RenderAttrTable(App& app, float height) {
     if (ImGui::Button("清空")) {
         app.attrs.clear();
         app.attr_sel.clear();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("重置节点池")) {
+        if (!app.modder.Mem().IsOpen()) {
+            app.SetStatus("请先点击\"初始化\"。");
+        } else if (app.modder.ResetPool()) {
+            app.SetStatus("节点池已清零,全部槽位恢复可用。");
+        } else {
+            app.SetStatus("重置节点池失败(池不存在或清零失败)。");
+        }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "把新增词条用的节点池整体清零回收。\n"
+            "在游戏里丢弃过带新词条的武器、或读档之后,\n"
+            "旧链表已作废但池槽不清零会一直占着,点此全部回收。\n"
+            "注意:若还有存活武器的词条挂在池内,清零会废掉那些词条。");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("复制上一件物品")) OnCopyPrevItem(app);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "把上次读取/保存的那件物品的词条,复制到当前物品上。\n"
+            "不复制基础属性(名字、耐久等各物品独立)。\n"
+            "用法:读取并改好一把武器后,捡起新武器,直接点此按钮。");
     }
     ImGui::PopStyleVar();
     ImGui::SameLine();
@@ -1324,15 +1461,13 @@ void RenderCfgTab(App& app) {
     row("节点 color 偏移 (0x...)", app.cfg_color, sizeof(app.cfg_color));
     row("节点 precent 偏移 (0x...)", app.cfg_precent, sizeof(app.cfg_precent));
     row("节点 value 偏移 (0x...)", app.cfg_value, sizeof(app.cfg_value));
-    row("节点大小 (attr_list.node_size, 0x...)", app.cfg_node_size, sizeof(app.cfg_node_size));
-    row("最大节点数 (attr_list.max_nodes)", app.cfg_max_nodes, sizeof(app.cfg_max_nodes));
 
     ImGui::Separator();
     if (ImGui::Button("保存配置并应用")) OnSaveCfg(app);
     ImGui::TextDisabled(
         "说明:以上为当前模式的 magic number,可在 poq 不同版本间切换。修改后点击\"保存配置并应用\""
         "立即生效,但仅本次会话有效(单文件版不写配置文件,重启回到内置默认)。"
-        "内置默认在 src/Core/OffsetsConfig.cpp 的 DefaultMode() 中维护(按 CT),"
+        "内置默认在 src/Core/OffsetsConfig.cpp 的 DefaultMode() 中维护,"
         "需要固定偏移时改代码重新编译。");
 }
 
@@ -1342,22 +1477,6 @@ void RenderCfgTab(App& app) {
 // 版本选择复用顶部全局选择器;steam/v1.30 两套召唤逻辑分别调用
 // summon_steam / summon_130 独立模块(文件级隔离,不做配置耦合,对齐 python
 // summon_tab.py + data/py/summon_tool_{steam,130}.py)。本文件只做 UI 编排。
-
-// 页面顶部说明(task7 #5,逐字保留)
-const char* kSummonTip =
-    "说明：\n"
-    "1. steam版本支持较好，v1.30只有部分功能;\n"
-    "1.1. steam版本可以召唤更多具体类别，攻击力普遍更强，刺客除外攻击力弱；\n"
-    "1.2. v1.30不支持召唤朱厌、善翼、刺客、指定类型的秦兵，且所有召唤攻击力弱，"
-    "无法造成伤害，只能拉仇恨，但秦兵死亡有物品掉落；\n"
-    "2. 点击激活后，力士使用“烽火狼烟”，就能召唤对应怪兽；\n"
-    "3. 激活状态下再点击“取消”按钮，状态恢复到烽火狼烟默认值，召唤狼；\n"
-    "4. 召唤太多队友，需要通过GM命令的look，找到队友对应ID，然后通过“kill {ID}”来取消，"
-    "所以不要召唤太多，尤其是steam版本，因为队友比较强不容易挂；\n"
-    "5. 召唤太多盟友可以通过GM命令kill all来清除，但这个可能会杀掉一些无辜NPC，甚至破坏剧情，"
-    "建议和上一条一样一个一个清理；\n"
-    "6. 执行4、5前可以保存并备份“System\\game\\player_{i}.gam”以防万一；\n"
-    "7. 读档后需要“重新激活”或“刷新召唤”；";
 
 // UI 数据镜像(对齐 python summon_tab.py: 下拉文案含序号,子类名与工具模块一致)。
 const char* kSummonMonNames[10] = {"狼",   "虎",   "熊", "白狼", "木偶",
@@ -1665,11 +1784,7 @@ void RenderSummonTab(App& app) {
         app.sm_sub_items.clear();
     }
 
-    // 第一行:说明(橙色,风格同其他 tab 的使用步骤提示)
-    ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.15f, 1.0f), "%s", kSummonTip);
-    ImGui::Separator();
-
-    // 第二行:激活状态标签(左) + 激活/取消 + 刷新召唤(右)
+    // 第一行:激活状态标签(左) + 激活/取消 + 刷新召唤(右)
     // 激活时:"激活状态：激活，当前召唤的怪物：<类别>，<阵营>";阵营=队友(group 0)/盟友(group 1)
     std::string status_text = app.summon_active
                                   ? "激活状态：激活，当前召唤的怪物：" + SummonCurrentSelection(app) +
@@ -1721,24 +1836,6 @@ void RenderSummonTab(App& app) {
 // 版本选择复用顶部全局选择器;steam/v1.30 的区别集中在 Core/GmCmd.h 的
 // GmVersion 常量(对齐 python gm_cmd.py 的"单模块双版本参数化"),本文件只做
 // UI 编排。纯 C++ 实现,不调用 python。
-
-// 页面顶部说明(用户改版:去掉 look/dir/object 条目,条目重新编号 1~4)
-const char* kGmTip =
-    "使用说明：\n"
-    "手动激活GM的方法：\n"
-    "1. 在“游戏目录\\System\\wizard\\wizard.lst”里加入“9 {用户名}”，"
-    "单机用户名为player，多人为自己设定名字，文件或目录不存在可以自行创建；\n"
-    "2. 完成上一步后，重启游戏，在游戏中按回车依次输入“{$objectpoq$}”和“r 9”后，"
-    "屏幕会出现激活提示；\n"
-    "本工具使用方法：\n"
-    "1. 使用前需要按激活按钮激活GM权限，如果一种方式无效，可以尝试另外一种，或者手动"
-    "（程序会静默建立wizard.lst文件，并加入当前用户）；\n"
-    "2. 激活后根据网上攻略尝试激活命令并执行即可，工具内可以无视GM命令长度限制，"
-    "但过长是否会崩溃没有试过；\n"
-    "3. 命令可以从网络获取，GM很多技巧可探索：比如杀死杂货铺掌柜或者铁匠铺掌柜或得装备"
-    "（记得杀完后用创建命令恢复，名字可以用look看到）；\n"
-    "4. 常用命令可以放到同目录下gm_cmd.txt中用于快速输入，用户可以自行编辑文档，"
-    "格式在文档中已给出；";
 
 // 解析 gm_cmd.txt 文本 -> (选项列表, 格式错误行数),对齐 python
 // gm_tab._parse_cmd_list:每行 "{命令}#{显示名}";空行忽略;行首 # 注释;
@@ -1956,6 +2053,12 @@ void OnGmExec(App& app) {
             AppendGmLog(app, gm_cmd::Send(ctx, cmd));
             if (i + 1 < count) ::Sleep(100);  // 多次执行之间休息 100ms
         }
+        // 记入本地命令历史(与上一条相同则不重复;最多缓存 30 条),浏览游标复位
+        if (app.gm_history.empty() || app.gm_history.back() != cmd) {
+            app.gm_history.push_back(cmd);
+            if (app.gm_history.size() > 30) app.gm_history.erase(app.gm_history.begin());
+        }
+        app.gm_hist_idx = -1;
         // 执行命令的工具日志不进界面,进 F12 调试日志
         GmRefreshReady(app);
         app.SetStatus("已执行 " + std::to_string(count) + " 次命令：" + cmd);
@@ -1977,14 +2080,7 @@ void RenderGmTab(App& app) {
         GmRefreshReady(app);
     }
 
-    // 第1部分:使用说明(橙色,自动换行)
-    const float avail_w = ImGui::GetContentRegionAvail().x;
-    ImGui::PushTextWrapPos(avail_w - 10.0f);
-    ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.15f, 1.0f), "%s", kGmTip);
-    ImGui::PopTextWrapPos();
-    ImGui::Separator();
-
-    // 第2部分:激活状态行(左) + 激活方式 + 激活/还原(右)
+    // 第1部分:激活状态行(左) + 激活方式 + 激活/还原(右)
     std::string status_text = app.gm_active ? "GM权限已激活" : "GM权限未激活";
     const ImVec4 status_color =
         app.gm_active ? ImVec4(0.0f, 0.8f, 0.0f, 1.0f) : ImVec4(1.0f, 0.0f, 0.0f, 1.0f);
@@ -2058,6 +2154,7 @@ void RenderGmTab(App& app) {
         }
     }
     // 下方:展开全部选项(自动限高,超出滚动);点选 -> 命令输入框显示对应命令
+    app.gm_cmdlist_focused = false;
     if (app.gm_cmd_list.empty()) {
         ImGui::TextDisabled("（暂无常用命令：可编辑同目录 gm_cmd.txt 后点“读取配置”加载）");
     } else {
@@ -2069,6 +2166,7 @@ void RenderGmTab(App& app) {
         if (!app.gm_active) ImGui::BeginDisabled();
         ImGui::BeginChild("##gm_cmdlist", ImVec2(ImGui::GetContentRegionAvail().x, list_h),
                           ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+        app.gm_cmdlist_focused = ImGui::IsWindowFocused();  // 列表持焦点时箭头留给列表滚动
         for (int i = 0; i < static_cast<int>(app.gm_cmd_list.size()); ++i) {
             const auto& kv = app.gm_cmd_list[static_cast<size_t>(i)];
             bool selected = (i == app.gm_cmdlist_sel);
@@ -2079,6 +2177,37 @@ void RenderGmTab(App& app) {
         }
         ImGui::EndChild();
         if (!app.gm_active) ImGui::EndDisabled();
+    }
+
+    // 上下箭头切换历史命令(仅当常用命令列表未持有焦点;单行输入框不消费上下箭头)。
+    // 上:从最新一条往前翻,到第一条失效;下:往回翻,翻过最新一条后还原浏览前的输入原文,
+    // 再按失效。
+    if (!app.gm_cmdlist_focused && !app.gm_history.empty()) {
+        const int n = static_cast<int>(app.gm_history.size());
+        int idx = app.gm_hist_idx;
+        std::string new_text;
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) {
+            if (idx == -1) {
+                app.gm_hist_draft = app.gm_cmd_buf;  // 保存输入框原文
+                idx = n - 1;                         // 从最新一条开始浏览
+            } else if (idx > 0) {
+                --idx;  // 到第一条(0)时不再上翻
+            }
+        } else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) {
+            if (idx >= 0) {
+                if (idx < n - 1) {
+                    ++idx;  // 往新的方向翻
+                } else {
+                    idx = -1;  // 已在最新一条:下翻回到输入框原文,再按失效
+                }
+            }
+        }
+        if (idx != app.gm_hist_idx) {
+            app.gm_hist_idx = idx;
+            const std::string& text = (idx == -1) ? app.gm_hist_draft
+                                                  : app.gm_history[static_cast<size_t>(idx)];
+            std::snprintf(app.gm_cmd_buf, sizeof(app.gm_cmd_buf), "%s", text.c_str());
+        }
     }
 
     // F12 调试模式:显示工具日志(对齐 summon tab 模式)
@@ -2097,19 +2226,700 @@ void RenderGmTab(App& app) {
 }
 
 // ============================================================================
+// GAM修改(task13): .gam 存档物品解析/修改/无中生有。
+//   记录帧 [len][content][count][echo=len+12]; 字段相对"别名尾 aend"固定偏移;
+//   词条=G_Info 字符串字段(GBK 文本); 地图=顶层容器(场景/物体组), 物品按区间归属。
+//   全部文件级, 不依赖游戏注入。
+// ============================================================================
+
+static std::string GbkToUtf8Str(const std::string& g) {
+    // 词条文本固定为 GBK(936), 不依赖系统区域(CP_ACP 在非中文系统会转乱码)
+    if (g.empty()) return "";
+    int n = ::MultiByteToWideChar(936, 0, g.data(), (int)g.size(), nullptr, 0);
+    if (n <= 0) return g;
+    std::wstring w((size_t)n, L'\0');
+    ::MultiByteToWideChar(936, 0, g.data(), (int)g.size(), &w[0], n);
+    return WideToUtf8(w);
+}
+static std::string Utf8ToGbkStr(const std::string& u) {
+    if (u.empty()) return "";
+    std::wstring w = Utf8ToWide(u);
+    if (w.empty()) return u;
+    int n = ::WideCharToMultiByte(936, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return u;
+    std::string g((size_t)n, '\0');
+    ::WideCharToMultiByte(936, 0, w.data(), (int)w.size(), &g[0], n, nullptr, nullptr);
+    return g;
+}
+
+// 前置声明(GamOnSave 会调用这些后定义的函数)
+static int GamSelMode(const App& app);
+static void GamCommitGInfo(App& app, poq::GamItem& it);
+
+// 物品显示名: 中文名(别名), 没有中文映射时仅别名。
+static std::string GamItemDispName(const App& app, const std::string& alias) {
+    if (app.gam_item_names_loaded) {
+        std::string cn = app.gam_item_names.Cn(alias);
+        if (!cn.empty()) return cn + "(" + alias + ")";
+    }
+    return alias;
+}
+
+// 生成物品属性提示(悬停显示): 解析记录 -> 固定字段 + 词条文本。
+static std::string GamFormatItemTip(const App& app, const std::vector<uint8_t>& rec) {
+    poq::GamItem it;
+    if (!poq::GamItem::ParseRecord(rec, it)) return "";
+    std::string out = GamItemDispName(app, it.alias);
+    bool ok = false;
+    int32_t lvl = it.GetField("lvl", &ok);
+    if (ok) out += "  Lv" + std::to_string((int)lvl);
+    out += "\n";
+    // 关键字段: 价格/重量/类型/鉴定/孔数/五行/需求/攻防
+    auto addf = [&](const char* label, const char* name) {
+        bool o = false;
+        int32_t v = it.GetField(name, &o);
+        if (o && v != -1) out += std::string(label) + std::to_string((int)v) + " ";
+    };
+    addf("价格", "price"); addf("重量", "wgt"); addf("类型", "type");
+    addf("鉴定", "ident"); addf("孔数", "sockets"); addf("五行", "wx");
+    addf("需等级", "req_lvl"); addf("需力量", "req_str");
+    addf("需敏捷", "req_agi"); addf("需体质", "req_con");
+    addf("攻击", "f_118"); addf("防御", "f_11c");
+    out += "\n词条:\n" + GbkToUtf8Str(it.GetGInfo());
+    return out;
+}
+
+// 持久化"上次打开 gam 的目录": 放 exe 同级 poqeditor_gam.ini(UTF-8 无 BOM 单行路径)
+static std::wstring GamPrefsPath() {
+    return AppDirW() + L"\\poqeditor_gam.ini";
+}
+
+static void GamSavePrefs(const std::string& last_dir) {
+    FILE* fp = _wfopen(GamPrefsPath().c_str(), L"wb");
+    if (!fp) return;
+    fwrite(last_dir.data(), 1, last_dir.size(), fp);
+    fclose(fp);
+}
+
+static std::string GamLoadPrefs() {
+    FILE* fp = _wfopen(GamPrefsPath().c_str(), L"rb");
+    if (!fp) return "";
+    char buf[4096];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    std::string s(buf, n);
+    size_t pos = s.find_first_of("\r\n");
+    if (pos != std::string::npos) s = s.substr(0, pos);
+    return s;
+}
+
+static std::wstring GamInitialDir(App& app) {
+    // 游戏运行时优先定位到其存档目录 System\game
+    std::optional<unsigned int> pid;
+    if (app.modder.Mem().IsOpen())
+        pid = app.modder.Pid();
+    else if (auto s = TryGetSelectedPid(app))
+        pid = s;
+    if (!pid) pid = FindPoqPid(app);
+    if (pid) {
+        auto path = poq::ProcessMemory::FindModulePath(*pid, "POQ.exe");
+        if (path) {
+            std::string p = *path;
+            size_t pos = p.find_last_of("/\\");
+            if (pos != std::string::npos) {
+                std::string exedir = p.substr(0, pos);
+                std::wstring sdir = Utf8ToWide(exedir + "\\System\\game");
+                if (::GetFileAttributesW(sdir.c_str()) != INVALID_FILE_ATTRIBUTES) return sdir;
+                std::wstring dir = Utf8ToWide(exedir);
+                if (!dir.empty() && ::GetFileAttributesW(dir.c_str()) != INVALID_FILE_ATTRIBUTES)
+                    return dir;
+            }
+        }
+    }
+    // 游戏未运行:记忆上次打开目录
+    if (!app.gam_last_dir.empty()) {
+        std::wstring w = Utf8ToWide(app.gam_last_dir);
+        if (::GetFileAttributesW(w.c_str()) != INVALID_FILE_ATTRIBUTES) return w;
+    }
+    return AppDirW();
+}
+
+static void GamOnOpen(App& app) {
+    std::string sel =
+        OpenFileDialog(GamInitialDir(app), L"GAM 存档 (*.gam)\0*.gam\0所有文件 (*)\0*.*\0\0");
+    if (sel.empty()) return;
+    poq::GamFile gf;
+    std::string err;
+    if (!poq::GamFile::Load(sel, gf, err)) {
+        MsgBox("打开失败", err, MB_ICONERROR);
+        return;
+    }
+    app.gam_file = std::move(gf);
+    app.gam_path = sel;
+    app.gam_loaded = true;
+    app.gam_sel_container = -1;
+    app.gam_sel_item = -1;
+    app.gam_edit_loaded_item = -1;
+    app.gam_ginfo_pending = false;
+    // 记忆上次打开目录(下次打开gam默认进该目录, 持久化到 exe 同级 ini)
+    {
+        size_t pos = sel.find_last_of("/\\");
+        if (pos != std::string::npos) app.gam_last_dir = sel.substr(0, pos);
+    }
+    GamSavePrefs(app.gam_last_dir);
+    app.SetStatus("GAM 已打开: " + app.gam_path + "（容器 " +
+                  std::to_string(app.gam_file.containers.size()) + "，物品 " +
+                  std::to_string(app.gam_file.items.size()) + "）");
+}
+
+static void GamOnSave(App& app) {
+    if (!app.gam_loaded) {
+        MsgBox("提示", "请先打开 gam 存档。", MB_ICONINFORMATION);
+        return;
+    }
+    // 提交当前物品的词条编辑(装配回 G_Info)
+    if (GamSelMode(app) == 1)
+        GamCommitGInfo(app, app.gam_file.items[(size_t)app.gam_sel_item]);
+    // 组装待插入记录(所有 is_new 物品 -> 按其当前内容重编)
+    std::vector<std::pair<int, std::vector<uint8_t>>> added;
+    for (size_t i = 0; i < app.gam_file.items.size(); ++i) {
+        const auto& it = app.gam_file.items[i];
+        if (!it.is_new) continue;
+        int ci = -1;
+        for (size_t c = 0; c < app.gam_file.containers.size(); ++c)
+            for (int idx : app.gam_file.containers[c].item_idx)
+                if (idx == (int)i) { ci = (int)c; break; }
+        if (ci >= 0) {
+            std::vector<uint8_t> rec;
+            if (poq::GamItem::BuildRecord(it, rec)) added.push_back({ci, std::move(rec)});
+        }
+    }
+    // 备份(已存在则不覆盖)
+    std::wstring bakw = Utf8ToWide(app.gam_path) + L".bak";
+    if (::GetFileAttributesW(bakw.c_str()) == INVALID_FILE_ATTRIBUTES)
+        ::CopyFileW(Utf8ToWide(app.gam_path).c_str(), bakw.c_str(), FALSE);
+    std::string err;
+    if (!poq::GamFile::Save(app.gam_file, app.gam_path, added, err)) {
+        MsgBox("保存失败", err, MB_ICONERROR);
+        return;
+    }
+    app.SetStatus("GAM 已保存：" + app.gam_path + "（新增 " + std::to_string(added.size()) + " 件）");
+    // 重载同步内存(位置/偏移已整体后移)
+    poq::GamFile gf;
+    std::string e;
+    if (poq::GamFile::Load(app.gam_path, gf, e)) {
+        int keep_c = app.gam_sel_container, keep_i = app.gam_sel_item;
+        app.gam_file = std::move(gf);
+        app.gam_sel_container = keep_c;
+        app.gam_sel_item = keep_i;
+        app.gam_edit_loaded_item = -1;
+    }
+}
+
+static int GamSelMode(const App& app) {
+    if (app.gam_sel_container >= 0 && app.gam_sel_item >= 0 &&
+        app.gam_sel_item < (int)app.gam_file.items.size())
+        return 1;  // 选中物品
+    if (app.gam_sel_container >= 0 && app.gam_sel_container < (int)app.gam_file.containers.size())
+        return 2;  // 仅选中地图
+    return 0;
+}
+
+static void GamOnCopyItem(App& app) {
+    if (GamSelMode(app) != 1) {
+        MsgBox("提示", "请先在左侧选中一件物品，再点\"复制物品\"。", MB_ICONINFORMATION);
+        return;
+    }
+    const poq::GamItem& it = app.gam_file.items[(size_t)app.gam_sel_item];
+    if (it.is_new) {
+        poq::GamItem::BuildRecord(it, app.gam_clip_record);
+    } else if (it.rec_end <= app.gam_file.buf.size()) {
+        app.gam_clip_record.assign(app.gam_file.buf.begin() + (ptrdiff_t)it.pos,
+                                   app.gam_file.buf.begin() + (ptrdiff_t)it.rec_end);
+    }
+    app.gam_has_record = !app.gam_clip_record.empty();
+    app.SetStatus(app.gam_has_record ? "已复制物品：" + it.alias : "复制物品失败");
+}
+
+// 把新建物品放到目标容器已有物品右侧(错开坐标, 避免叠位/不可见; 无已有物品则保留源坐标)
+static void GamPlaceNewItem(App& app, int item_idx) {
+    if (item_idx < 0 || item_idx >= (int)app.gam_file.items.size()) return;
+    if (app.gam_sel_container < 0 ||
+        app.gam_sel_container >= (int)app.gam_file.containers.size())
+        return;
+    auto& cont = app.gam_file.containers[(size_t)app.gam_sel_container];
+    long maxx = -0x7FFFFFFF;
+    for (int idx : cont.item_idx) {
+        if (idx < 0 || idx >= (int)app.gam_file.items.size()) continue;
+        if (idx == item_idx) continue;
+        bool ok = false;
+        int32_t x = app.gam_file.items[(size_t)idx].GetField("f_c8", &ok);
+        if (ok && x >= 0 && x < 0x1000000) maxx = std::max<long>(maxx, (long)x);
+    }
+    int newx = (maxx > -0x7FFFFFFF) ? (int)(maxx + 40) : 100;
+    app.gam_file.items[(size_t)item_idx].SetField("f_c8", newx);
+}
+
+static void GamOnPasteItem(App& app) {
+    if (!app.gam_has_record || app.gam_clip_record.empty()) {
+        MsgBox("提示", "剪贴板中没有物品记录，请先\"复制物品\"或从目录\"创建物品\"。", MB_ICONINFORMATION);
+        return;
+    }
+    if (GamSelMode(app) < 2) {
+        MsgBox("提示", "请先在左侧选中一个地图(容器)。", MB_ICONINFORMATION);
+        return;
+    }
+    poq::GamItem it;
+    if (!poq::GamItem::ParseRecord(app.gam_clip_record, it)) {
+        MsgBox("粘贴失败", "剪贴板记录不是合法物品帧。", MB_ICONERROR);
+        return;
+    }
+    it.is_new = true;
+    auto& items = app.gam_file.items;
+    int idx = (int)items.size();
+    items.push_back(std::move(it));
+    app.gam_file.containers[(size_t)app.gam_sel_container].item_idx.push_back(idx);
+    app.gam_sel_item = idx;
+    app.gam_edit_loaded_item = -1;
+    GamPlaceNewItem(app, idx);  // 错开坐标避免叠位/不可见
+    app.SetStatus("已在地图中粘贴物品：" + items[(size_t)idx].alias);
+}
+
+static void GamOnCopyAttr(App& app) {
+    if (GamSelMode(app) != 1) {
+        MsgBox("提示", "请先选中一件物品(在右侧编辑界面)。", MB_ICONINFORMATION);
+        return;
+    }
+    const poq::GamItem& it = app.gam_file.items[(size_t)app.gam_sel_item];
+    app.gam_clip_fields.clear();
+    for (const auto& f : poq::GamFile::FieldList()) {
+        bool ok = false;
+        int32_t v = it.GetField(f.name, &ok);
+        if (ok) app.gam_clip_fields[f.name] = v;
+    }
+    app.gam_clip_ginfo = it.GetGInfo();
+    app.gam_has_attrs = true;
+    app.SetStatus("已复制属性：" + it.alias);
+}
+
+static void GamOnPasteAttr(App& app) {
+    if (GamSelMode(app) != 1) {
+        MsgBox("提示", "请先选中一件物品(在右侧编辑界面)。", MB_ICONINFORMATION);
+        return;
+    }
+    if (!app.gam_has_attrs) {
+        MsgBox("提示", "剪贴板中没有属性，请先\"复制属性\"。", MB_ICONINFORMATION);
+        return;
+    }
+    poq::GamItem& it = app.gam_file.items[(size_t)app.gam_sel_item];
+    bool ginfo_ok = true;
+    for (const auto& kv : app.gam_clip_fields) it.SetField(kv.first.c_str(), kv.second);
+    if (!app.gam_clip_ginfo.empty()) ginfo_ok = it.SetGInfo(app.gam_clip_ginfo);
+    app.gam_edit_loaded_item = -1;  // 刷新词条显示
+    std::string msg = "已粘贴属性到 " + it.alias;
+    if (!ginfo_ok) msg += "（词条文本变长无法原位覆盖，已保留原词条）";
+    app.SetStatus(msg);
+}
+
+static void GamOnCreate(App& app) {
+    if (!app.gam_cat_loaded || app.gam_sel_cat < 0 ||
+        app.gam_sel_cat >= (int)app.gam_catalog.cats.size()) {
+        MsgBox("提示", "物品目录未加载（缺少 gam_catalog.bin，请放 exe 目录或 data 子目录）。",
+               MB_ICONINFORMATION);
+        return;
+    }
+    const auto& ents = app.gam_catalog.items[(size_t)app.gam_sel_cat];
+    if (ents.empty() || app.gam_sel_cat_item < 0 ||
+        app.gam_sel_cat_item >= (int)ents.size())
+        return;
+    if (GamSelMode(app) < 2) {
+        MsgBox("提示", "请先在左侧选中一个地图(容器)。", MB_ICONINFORMATION);
+        return;
+    }
+    const auto& e = ents[(size_t)app.gam_sel_cat_item];
+    poq::GamItem it;
+    if (!poq::GamItem::ParseRecord(e.rec, it)) {
+        MsgBox("创建失败", "目录记录不是合法物品帧。", MB_ICONERROR);
+        return;
+    }
+    it.is_new = true;
+    auto& items = app.gam_file.items;
+    int idx = (int)items.size();
+    items.push_back(std::move(it));
+    app.gam_file.containers[(size_t)app.gam_sel_container].item_idx.push_back(idx);
+    app.gam_sel_item = idx;
+    app.gam_edit_loaded_item = -1;
+    GamPlaceNewItem(app, idx);  // 错开坐标避免叠位/不可见
+    app.SetStatus("已创建物品：" + GamItemDispName(app, e.name));
+}
+
+static void RenderGamTree(App& app) {
+    ImGui::BeginChild("gamtree", ImVec2(0.0f, ImGui::GetContentRegionAvail().y),
+                      ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
+    static char filt[128] = {0};
+    ImGui::TextUnformatted("地图(区域) -> 房间/物体 -> 物品：");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputText("##gamfilt", filt, sizeof(filt));
+    ImGui::Separator();
+    ImGui::BeginChild("gamtree2");
+    std::string lowf = ToLower(filt);
+
+    // 构建分级结构: 地图(区域) -> 房间/物体 -> 容器
+    struct Room { std::string label; int cont; };
+    struct Region { std::string disp; std::vector<Room> rooms; std::vector<Room> objs; };
+    std::vector<Region> regions;
+    std::map<std::string, int> ridx;
+    std::string cur_region;
+    auto seg = [](const std::string& path, int a, int b) {  // "/" 分割取 [a,b)
+        std::vector<std::string> segs;
+        size_t i = 0;
+        while (true) {
+            size_t j = path.find('/', i);
+            if (j == std::string::npos) { segs.push_back(path.substr(i)); break; }
+            segs.push_back(path.substr(i, j - i));
+            i = j + 1;
+        }
+        std::string out;
+        for (int k = a; k < b && k < (int)segs.size(); ++k) {
+            if (!out.empty()) out += "/";
+            out += segs[(size_t)k];
+        }
+        return out;
+    };
+    for (int ci = 0; ci < (int)app.gam_file.containers.size(); ++ci) {
+        const auto& c = app.gam_file.containers[(size_t)ci];
+        if (c.item_idx.empty()) continue;
+        std::string path = app.gam_scene_loaded ? app.gam_scene_cat.MatchPath(c.alias) : "";
+        std::string region_disp, room_label;
+        bool is_scene = false;
+        if (!path.empty()) {
+            region_disp = seg(path, 0, 2);      // 秦殇/邯郸
+            room_label = seg(path, 3, 4);       // 武器铺
+            if (room_label.empty()) room_label = c.alias;
+            cur_region = region_disp;
+            is_scene = true;
+        } else {
+            room_label = c.alias;               // 物体(未匹配场景)
+            region_disp = cur_region.empty() ? "未分类" : cur_region;
+        }
+        if (ridx.find(region_disp) == ridx.end()) {
+            ridx[region_disp] = (int)regions.size();
+            regions.push_back(Region{region_disp, {}, {}});
+        }
+        Room r{room_label, ci};
+        if (is_scene) regions[(size_t)ridx[region_disp]].rooms.push_back(std::move(r));
+        else regions[(size_t)ridx[region_disp]].objs.push_back(std::move(r));
+    }
+
+    // 渲染
+    auto render_items = [&](int ci) {
+        const auto& c = app.gam_file.containers[(size_t)ci];
+        for (int idx : c.item_idx) {
+            if (idx < 0 || idx >= (int)app.gam_file.items.size()) continue;
+            const auto& it = app.gam_file.items[(size_t)idx];
+            bool ok = false;
+            int32_t lvl = it.GetField("lvl", &ok);
+            char buf[300];
+            std::string disp = GamItemDispName(app, it.alias);
+            if (disp.size() > sizeof(buf) - 60) disp = disp.substr(0, sizeof(buf) - 60);
+            std::snprintf(buf, sizeof(buf), "(%d) %s  Lv%d%s##i%s%zX", idx, disp.c_str(),
+                          ok ? (int)lvl : 0, it.is_new ? " [新增]" : "",
+                          it.is_new ? "n" : "", it.is_new ? (size_t)idx : it.pos);
+            bool sel = (app.gam_sel_item == idx);
+            if (ImGui::Selectable(buf, sel)) {
+                app.gam_sel_container = ci;
+                app.gam_sel_item = idx;
+                app.gam_edit_loaded_item = -1;
+            }
+        }
+    };
+    for (int ri = 0; ri < (int)regions.size(); ++ri) {
+        const Region& R = regions[(size_t)ri];
+        std::string rlabel = R.disp + "##r" + std::to_string(ri);
+        if (!lowf.empty() && ToLower(R.disp).find(lowf) == std::string::npos) continue;
+        if (!ImGui::TreeNodeEx(rlabel.c_str(), ImGuiTreeNodeFlags_SpanAvailWidth)) {
+            continue;
+        }
+        for (const Room& room : R.rooms) {
+            char rb[300];
+            std::snprintf(rb, sizeof(rb), "%s (%d)##room%X", room.label.c_str(),
+                          (int)app.gam_file.containers[(size_t)room.cont].item_idx.size(),
+                          (unsigned)(app.gam_file.containers[(size_t)room.cont].start & 0xFFFFFFFF));
+            bool open = ImGui::TreeNodeEx(rb, ImGuiTreeNodeFlags_SpanAvailWidth);
+            if (ImGui::IsItemClicked() && ImGui::GetIO().MouseClicked[0]) {
+                app.gam_sel_container = room.cont;
+                app.gam_sel_item = -1;
+            }
+            if (open) {
+                render_items(room.cont);
+                ImGui::TreePop();
+            }
+        }
+        for (const Room& obj : R.objs) {
+            char ob[300];
+            std::snprintf(ob, sizeof(ob), "%s (%d)##obj%X", obj.label.c_str(),
+                          (int)app.gam_file.containers[(size_t)obj.cont].item_idx.size(),
+                          (unsigned)(app.gam_file.containers[(size_t)obj.cont].start & 0xFFFFFFFF));
+            bool open = ImGui::TreeNodeEx(ob, ImGuiTreeNodeFlags_SpanAvailWidth);
+            if (ImGui::IsItemClicked() && ImGui::GetIO().MouseClicked[0]) {
+                app.gam_sel_container = obj.cont;
+                app.gam_sel_item = -1;
+            }
+            if (open) {
+                render_items(obj.cont);
+                ImGui::TreePop();
+            }
+        }
+        ImGui::TreePop();
+    }
+    ImGui::EndChild();
+    ImGui::EndChild();
+}
+
+// 词条颜色 -> 中文标签
+static const char* GamColorLabel(char c) {
+    switch (c) {
+        case 'K': return "蓝色";
+        case 'C': return "亮蓝色(激活隐藏)";
+        case 'Z': return "金色";
+        case 'H': return "暗蓝色(未激活隐藏)";
+        default:  return "白色";
+    }
+}
+static const char kGamColorLetters[] = {0, 'K', 'C', 'Z', 'H'};
+
+// 把当前物品的 G_Info 解析进编辑状态(隐藏头行, 只留词条)
+static void GamLoadGInfoRows(App& app, poq::GamItem& it) {
+    app.gam_grows.clear();
+    it.ParseGInfoRows(app.gam_grows);
+    app.gam_gheader = it.GetGInfoHeader();
+}
+
+// 把编辑态的词条装配回 G_Info(等长/变长均可; 变长由保存时重排落盘)
+static void GamCommitGInfo(App& app, poq::GamItem& it) {
+    std::string txt;
+    if (!poq::GamItem::BuildGInfoText(app.gam_gheader, app.gam_grows, txt)) return;
+    it.SetGInfo(txt);
+}
+
+static void RenderGamEdit(App& app) {
+    if (GamSelMode(app) != 1) {
+        ImGui::TextDisabled("左侧选中地图后，点选一件物品进入编辑。");
+        return;
+    }
+    poq::GamItem& it = app.gam_file.items[(size_t)app.gam_sel_item];
+    // 选中物品变化: 先提交上一件的词条编辑, 再载入新物品
+    if (app.gam_edit_loaded_item != app.gam_sel_item) {
+        if (app.gam_edit_loaded_item >= 0 &&
+            app.gam_edit_loaded_item < (int)app.gam_file.items.size())
+            GamCommitGInfo(app, app.gam_file.items[(size_t)app.gam_edit_loaded_item]);
+        GamLoadGInfoRows(app, it);
+        app.gam_edit_loaded_item = app.gam_sel_item;
+    }
+    // 名称
+    std::string disp = GamItemDispName(app, it.alias);
+    ImGui::Text("物品名: %s  (别名字段: %s)   L=%u   %s", disp.c_str(), it.alias.c_str(), it.len,
+                it.is_new ? "（新增，保存后写入所选地图）" : "");
+    ImGui::Separator();
+    // 基础字段网格(3 列)
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const int cols = avail >= 800.0f ? 4 : (avail >= 500.0f ? 3 : 2);
+    if (ImGui::BeginTable("gambasic", cols, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+        int col = 0;
+        for (const auto& f : poq::GamFile::FieldList()) {
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(f.label);
+            bool ok = false;
+            int32_t v = it.GetField(f.name, &ok);
+            int ed = ok ? (int)v : -1;
+            std::string id = "##gam" + std::string(f.name);
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::InputInt(id.c_str(), &ed)) it.SetField(f.name, ed);
+            ++col;
+        }
+        ImGui::EndTable();
+    }
+    ImGui::Separator();
+    // 词条: 一行一个属性(隐藏模板头), 保存时装配回 G_Info
+    ImGui::TextUnformatted("词条（一行一个属性，保存时装配）：");
+    const char* color_items[] = {"白色", "蓝色(K)", "亮蓝色(C,激活隐藏)", "金色(Z)", "暗蓝色(H,未激活隐藏)"};
+    const char color_letters[] = {0, 'K', 'C', 'Z', 'H'};
+    int del = -1;
+    if (ImGui::BeginTable("grows", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("色", ImGuiTableColumnFlags_WidthFixed, 160.0f);
+        ImGui::TableSetupColumn("属性名", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+        ImGui::TableSetupColumn("值", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("上限", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("%", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+        ImGui::TableHeadersRow();
+        for (int i = 0; i < (int)app.gam_grows.size(); ++i) {
+            auto& r = app.gam_grows[(size_t)i];
+            ImGui::PushID(i);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            int cc = 0;
+            for (int x = 0; x < 5; ++x) if (color_letters[x] == r.color) { cc = x; break; }
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::Combo("##col", &cc, color_items, 5)) r.color = color_letters[cc];
+            ImGui::TableSetColumnIndex(1);
+            {
+                std::string u = GbkToUtf8Str(r.name);
+                ImGui::TextUnformatted(u.c_str());
+            }
+            ImGui::TableSetColumnIndex(2);
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            int v = (int)r.vmin;
+            if (ImGui::InputInt("##v", &v)) r.vmin = v;
+            ImGui::TableSetColumnIndex(3);
+            if (r.has_max) {
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                int m = (int)r.vmax;
+                if (ImGui::InputInt("##m", &m)) r.vmax = m;
+            }
+            ImGui::TableSetColumnIndex(4);
+            ImGui::Checkbox("##p", &r.is_percent);
+            ImGui::TableSetColumnIndex(5);
+            if (ImGui::SmallButton("删")) del = i;
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (del >= 0) app.gam_grows.erase(app.gam_grows.begin() + del);
+    if (ImGui::Button("添加属性")) {
+        poq::GamItem::GInfoRow r{};
+        r.color = 0;
+        r.name = "属性名";
+        r.vmin = 0;
+        r.has_max = false;
+        r.is_percent = false;
+        app.gam_grows.push_back(r);
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("改完后点\"保存文件\"即装配写回；模板头已隐藏、保存时自动补回。数值/上限可任意改（变长会自动重排）。");
+}
+
+static void RenderGamTab(App& app) {
+    // 按钮行: 自动宽度 + 超宽自动换行(避免末尾按钮被挤出屏幕)
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 4));
+    const float line_max_x = ImGui::GetContentRegionAvail().x;
+    auto put_btn = [&](const char* text, auto fn) {
+        float bw = ImGui::CalcTextSize(text).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        if (ImGui::GetCursorPosX() + bw + 12.0f > line_max_x) ImGui::NewLine();
+        if (ImGui::Button(text)) fn();
+        ImGui::SameLine(0, 8.0f);
+    };
+    put_btn("打开gam", [&]{ GamOnOpen(app); });
+    put_btn("保存文件", [&]{ GamOnSave(app); });
+    put_btn("复制物品", [&]{ GamOnCopyItem(app); });
+    put_btn("粘贴物品", [&]{ GamOnPasteItem(app); });
+    put_btn("复制属性", [&]{ GamOnCopyAttr(app); });
+    put_btn("粘贴属性", [&]{ GamOnPasteAttr(app); });
+    ImGui::PopStyleVar();
+    ImGui::NewLine();  // 结束按钮行, 状态回下一行
+    // 状态(独立一行, 不挤按钮)
+    if (app.gam_loaded)
+        ImGui::TextDisabled("%s  |  物品 %d  容器 %d", app.gam_path.c_str(),
+                            (int)app.gam_file.items.size(),
+                            (int)app.gam_file.containers.size());
+
+    // 创建新武器(目录): 类别定宽(固定), 具体物品占剩余宽度, 合上后悬停也显示属性
+    ImGui::Separator();
+    float row_x = ImGui::GetContentRegionAvail().x;
+    const float lbl_w = ImGui::CalcTextSize("创建新武器：").x;
+    const char* cat_preview = app.gam_cat_loaded ? app.gam_catalog.cats[(size_t)app.gam_sel_cat].c_str()
+                                                 : "(目录未加载)";
+    const float cat_w = 96.0f;  // 类别下拉固定宽度(不随内容/选中项变化)
+    const float btn_w = ImGui::CalcTextSize("创建物品").x + ImGui::GetStyle().FramePadding.x * 2.0f + 10.0f;
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    float item_w = row_x - lbl_w - cat_w - btn_w - spacing * 4;
+    if (item_w < 120.0f) item_w = 120.0f;   // 窗口过窄时物品框至少 120px
+    ImGui::TextUnformatted("创建新武器：");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(cat_w);
+    if (ImGui::BeginCombo("##cat", cat_preview)) {
+        if (!app.gam_cat_loaded) ImGui::TextDisabled("缺少 gam_catalog.bin");
+        for (int i = 0; i < (int)app.gam_catalog.cats.size(); ++i)
+            if (ImGui::Selectable(app.gam_catalog.cats[(size_t)i].c_str(), i == app.gam_sel_cat))
+                app.gam_sel_cat = i;
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    const auto& ents = (app.gam_cat_loaded && app.gam_sel_cat < (int)app.gam_catalog.cats.size())
+                           ? app.gam_catalog.items[(size_t)app.gam_sel_cat]
+                           : std::vector<poq::GamCatalog::Entry>();
+    static std::string preview_buf;
+    if (!ents.empty() && app.gam_sel_cat_item < (int)ents.size()) {
+        std::string dm = GamItemDispName(app, ents[(size_t)app.gam_sel_cat_item].name);
+        preview_buf = "Lv" + std::to_string(ents[(size_t)app.gam_sel_cat_item].level) + " " + dm;
+    } else {
+        preview_buf = "选择物品";
+    }
+    ImGui::SetNextItemWidth(item_w);
+    bool item_combo_open = ImGui::BeginCombo("##item", preview_buf.c_str(), ImGuiComboFlags_HeightLarge);
+    static int tip_i = -1;
+    static std::string tip;
+    if (item_combo_open) {
+        for (int i = 0; i < (int)ents.size(); ++i) {
+            std::string lab = "Lv" + std::to_string(ents[(size_t)i].level) + " " +
+                             GamItemDispName(app, ents[(size_t)i].name);
+            lab += "##ci" + std::to_string(i);  // 重复物品名(如多个东海石)不冲突
+            bool sel = (i == app.gam_sel_cat_item);
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::Selectable(lab.c_str(), sel)) app.gam_sel_cat_item = i;
+            if (ImGui::IsItemHovered()) {
+                if (tip_i != i) {
+                    tip = GamFormatItemTip(app, ents[(size_t)i].rec);
+                    tip_i = i;
+                }
+                if (!tip.empty()) ImGui::SetTooltip("%s", tip.c_str());
+            }
+        }
+        ImGui::EndCombo();
+    } else {
+        // 合上后悬停当前选中物品也显示属性
+        if (ImGui::IsItemHovered() && !ents.empty() && app.gam_sel_cat_item >= 0 &&
+            app.gam_sel_cat_item < (int)ents.size()) {
+            if (tip_i != app.gam_sel_cat_item) {
+                tip = GamFormatItemTip(app, ents[(size_t)app.gam_sel_cat_item].rec);
+                tip_i = app.gam_sel_cat_item;
+            }
+            if (!tip.empty()) ImGui::SetTooltip("%s", tip.c_str());
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("创建物品")) GamOnCreate(app);
+    // 提示独立一行, 避免把按钮挤出去
+    ImGui::TextDisabled("（先选中左侧地图，再把目录物品新建到该地图；选中具体物品后可悬停看属性）");
+
+    ImGui::Separator();
+
+    if (!app.gam_loaded) {
+        ImGui::TextDisabled("尚未打开 gam。点\"打开gam\"选择存档(默认定位到游戏目录)。");
+        return;
+    }
+
+    // 左树 + 右编辑
+    float avail = ImGui::GetContentRegionAvail().x;
+    float w = avail * 0.42f;
+    if (w < 260.0f) w = 260.0f;
+    ImGui::BeginChild("gamleft", ImVec2(w, ImGui::GetContentRegionAvail().y),
+                      ImGuiChildFlags_Borders);
+    RenderGamTree(app);
+    ImGui::EndChild();
+    ImGui::SameLine();
+    ImGui::BeginChild("gamright", ImVec2(-FLT_MIN, ImGui::GetContentRegionAvail().y),
+                      ImGuiChildFlags_Borders);
+    RenderGamEdit(app);
+    ImGui::EndChild();
+}
+
+// ============================================================================
 // H2 加解密(task10): H2 数据文件原地加解密。
 //   加密态: 首字节 0x80, 其余所有字节 ^0x78; 明文: GBK 编码, tab 分隔 csv。
 //   解密: 首字节 0x80 则去掉后其余 ^0x78; 加密: 全部 ^0x78 后开头补 0x80。
 //   转换前先备份原文件为 "<原名>.dec.bak"(解密) / "<原名>.enc.bak"(加密)。
 // ============================================================================
-const char* kH2Tip =
-    "使用说明：\n"
-    "H2加解密工具：\n"
-    "1. 在“游戏目录\\Data\\”存放加密过的游戏参数，例如物品爆率等；\n"
-    "2. 解密后的文件是GBK编码，请使用Excel打开、编辑、保存；\n"
-    "3. 解密过的文件将不再出现乱码，修改请参考照论坛或者其他教程；\n"
-    "4. 需要退出游戏重新进入后生效（存档+读档未确定）；\n"
-    "4. 程序在解密和加密前会在原目录备份文件并加上“.dec.bak”或“.env.bak”后缀，该错了可手动恢复；";
 
 std::wstring H2BackupPath(const std::wstring& path, bool decrypt) {
     return path + (decrypt ? L".dec.bak" : L".enc.bak");
@@ -2389,14 +3199,8 @@ void H2RenderDirConfirm(App& app) {
     }
 }
 
-// H2解密 tab 主渲染(对齐 GM tab 顶部说明样式)。
+// H2解密 tab 主渲染。
 void RenderH2Tab(App& app) {
-    const float avail_w = ImGui::GetContentRegionAvail().x;
-    ImGui::PushTextWrapPos(avail_w - 10.0f);
-    ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.15f, 1.0f), "%s", kH2Tip);
-    ImGui::PopTextWrapPos();
-    ImGui::Separator();
-
     const float btn_w =
         ImGui::CalcTextSize("解密目录").x + ImGui::GetStyle().FramePadding.x * 2.0f;
     ImGui::TextDisabled("单个文件：");
@@ -2416,8 +3220,8 @@ void RenderH2Tab(App& app) {
 
 // ============================================================================
 // 版本号:日期部分从编译期 __DATE__("Mmm dd yyyy")生成 YYMMDD,每次编译自动取当天;
-// 后缀 "v1"(或 v2/v3...)为手动版本号,由用户指定后改这里。
-// 启动弹窗显示形如 "Ver: 260826v1"。
+// 后缀 "v2"(或 v1/v3...)为手动版本号,由用户指定后改这里。
+// 启动弹窗显示形如 "Ver: 260903v2"。
 // ============================================================================
 constexpr int kVerMonth() {
     constexpr const char* names[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -2438,7 +3242,7 @@ constexpr int kVerDay() {
 }
 const char* kVersionText() {
     static char buf[32];
-    std::snprintf(buf, sizeof(buf), "Ver: %02d%02d%02dv1", kVerYear2(), kVerMonth(), kVerDay());
+    std::snprintf(buf, sizeof(buf), "Ver: %02d%02d%02dv2", kVerYear2(), kVerMonth(), kVerDay());
     return buf;
 }
 
@@ -2533,10 +3337,6 @@ void RenderMsgQueue() {
 
 // 属性修改(角色)Tab:全局属性 + 角色选择 + 字段网格(task6 指定排列)。
 void RenderCharTab(App& app) {
-    // 使用步骤提示:角色读取用固定偏移定位,需先选择人物并读取
-    ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.15f, 1.0f),
-                       "使用步骤：第1步：选择修改人物并读取属性；第2步：修改个人属性；第3步：存档后读档查看属性；");
-    ImGui::Separator();
     // ---- 全局属性(队伍共享,置顶)----
     ImGui::TextUnformatted("全局属性");
     ImGui::Separator();
@@ -2564,8 +3364,13 @@ void RenderCharTab(App& app) {
     ImGui::TextUnformatted("角色:");
     ImGui::SameLine();
     std::vector<std::string> char_labels;
-    for (size_t i = 0; i < app.char_names.size(); ++i)
-        char_labels.push_back("角色" + std::to_string(i + 1) + "-" + app.char_names[i]);
+    for (size_t i = 0; i < app.char_names.size(); ++i) {
+        // 下拉格式 = "角色N-职业-名字"(前缀"角色N-" + 前面角色类型,后面角色名字)
+        auto it = KnownMembers().find(app.char_names[i]);
+        std::string cls = (it != KnownMembers().end()) ? it->second + "-" : "";
+        char_labels.push_back("角色" + std::to_string(i + 1) + "-" + cls +
+                              app.char_names[i]);
+    }
     std::vector<const char*> char_items;
     for (const auto& l : char_labels) char_items.push_back(l.c_str());
     int csel = app.char_selected;
@@ -2582,7 +3387,41 @@ void RenderCharTab(App& app) {
     ImGui::SameLine();
     if (ImGui::Button("保存属性")) OnCharSave(app);
     ImGui::SameLine();
+    bool filter_on = app.char_filter;
+    if (ImGui::Checkbox("角色属性校验过滤", &filter_on)) {
+        if (!filter_on) app.char_filter_warn = true;
+        app.char_filter = filter_on;
+    }
+    ImGui::SameLine();
     ImGui::TextDisabled("%s", app.char_status.c_str());
+    if (!app.hidden && !app.char_slot_probe.empty()) {
+        ImGui::TextDisabled("槽位探测:");
+        for (size_t i = 0; i < app.char_slot_probe.size(); ++i) {
+            ImGui::TextDisabled("  槽%zu=%s", i + 1, app.char_slot_probe[i].c_str());
+        }
+    }
+    // 关闭"角色属性校验过滤"时的警告弹窗(居中、不可移动)
+    if (app.char_filter_warn) {
+        app.char_filter_warn = false;
+        ImGui::OpenPopup("警告##charfilter");
+    }
+    ImGui::SetNextWindowSize(ImVec2(460, 170), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("警告##charfilter", nullptr,
+                                ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                    ImGuiWindowFlags_NoCollapse)) {
+        // 每帧强制整窗居中(不依赖 Appearing 锚点,避免 AutoResize 导致偏位)
+        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetWindowPos(ImVec2(center.x - ImGui::GetWindowSize().x * 0.5f,
+                                   center.y - ImGui::GetWindowSize().y * 0.5f));
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 20);
+        ImGui::TextWrapped("如果取消校验过滤，可能识别出其他角色，请谨慎修改！");
+        ImGui::Spacing();
+        const float btn_w = 120;
+        ImGui::SetCursorPosX((ImGui::GetWindowSize().x - btn_w) * 0.5f);
+        ImGui::SetCursorPosY(ImGui::GetWindowSize().y - 40);
+        if (ImGui::Button("确认", ImVec2(btn_w, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
 
     ImGui::Separator();
 
@@ -2683,12 +3522,14 @@ void RenderTopBar(App& app) {
     const float spacing = style.ItemSpacing.x;
     const float frame_pad_x = style.FramePadding.x * 2.0f;
 
-    // 右侧按钮组总宽(刷新进程 + 初始化,用于让下拉框占满剩余宽度并右对齐)
+    // 右侧按钮组总宽(刷新进程 + 初始化 + 帮助,用于让下拉框占满剩余宽度并右对齐)
     const char* kRefresh = "刷新进程";
     const char* kInit = "初始化";
+    const char* kHelp = "帮助";
     const float refresh_w = ImGui::CalcTextSize(kRefresh).x + frame_pad_x;
     const float init_w = ImGui::CalcTextSize(kInit).x + frame_pad_x;
-    const float buttons_w = refresh_w + spacing + init_w;
+    const float help_w = ImGui::CalcTextSize(kHelp).x + frame_pad_x;
+    const float buttons_w = refresh_w + init_w + help_w + spacing * 2.0f;
 
     // 游戏版本(mode)下拉项:显示 mode 名(v1.30 / Steam版)
     std::vector<std::string> ver_labels;
@@ -2709,7 +3550,7 @@ void RenderTopBar(App& app) {
     const float proc_label_w = ImGui::CalcTextSize(kProcLabel).x;
     const float ver_w = 150.0f;
     const float row_w = ImGui::GetContentRegionAvail().x;
-    float proc_w = row_w - ver_label_w - ver_w - proc_label_w - buttons_w - spacing * 5.0f;
+    float proc_w = row_w - ver_label_w - ver_w - proc_label_w - buttons_w - spacing * 4.0f;
     if (proc_w < 80.0f) proc_w = 80.0f;  // 窗口过窄时给进程下拉保底
 
     // 游戏版本切换 = 切换 offsets 模式:先还原旧模式注入,再切换并提示重新初始化
@@ -2746,6 +3587,112 @@ void RenderTopBar(App& app) {
     if (ImGui::Button("刷新进程")) app.RefreshProcesses();
     ImGui::SameLine(0, spacing);
     if (ImGui::Button("初始化")) OnInit(app);
+    ImGui::SameLine(0, spacing);
+    if (ImGui::Button("帮助")) {
+        // 弹窗打开瞬间跳到当前所在 tab 的说明(仅第一帧生效,之后可自由切换)
+        app.help_tab = app.cur_tab;
+        app.help_jump = true;
+        ImGui::OpenPopup("帮助");
+    }
+}
+
+// ============================================================================
+// 使用说明弹窗:多 tab,tab 名与主界面一致;打开时自动跳到当前所在 tab。
+// (内存查看/偏移设置为调试 tab,无使用说明)
+// ============================================================================
+struct HelpTabContent {
+    const char* name;              // tab 名(与主界面一致)
+    const char* const* steps;      // 步骤文本,每行一条
+    int step_count;
+};
+
+const char* const kHelpCharSteps[] = {
+    "1. 初始化:启动游戏并进入存档后,点顶部\"初始化\"打开游戏进程。",
+    "2. 读取属性:在\"角色\"下拉框选择要修改的人物,点\"读取属性\",网格中显示该人物的属性。",
+    "3. 修改:直接编辑网格中的各属性值;\"全局属性\"区为全队共享——金钱填好后点\"修改金钱\"写入,无敌模式/一击必杀勾选即生效。",
+    "4. 保存属性:点\"保存属性\"把人物属性写回游戏内存。",
+    "5. 存档:在游戏里存档,读档后可查看修改后的属性。",
+};
+
+const char* const kHelpItemSteps[] = {
+    "1. 初始化:点\"初始化\"打开游戏进程(自动完成物品捕获,无需额外操作)。",
+    "2. 钩住物品:在游戏里把要改的物品扔到地上再捡起来,钩子会在捡起瞬间捕获它。",
+    "3. 读取属性:点\"读取属性\",表格显示当前所有词条(同时自动缓存一份,供\"复制上一件物品\"使用);读不到或读到旧物品时,重复第 2 步再点读取。",
+    "4. 编辑词条:直接修改数值、颜色、类型,或用\"添加/删除/清空\"调整数量;也可\"从模板读取\"、\"另存为\"批量处理。",
+    "5. 保存属性:点\"保存属性\"写回内存。现有词条写回原链表节点;新增的词条由编辑器自动从节点池(编辑器管理的一块固定内存)分配并接到链尾,无需手工干预。",
+    "6. 游戏内生效:保存后在游戏里把该物品扔到地上再捡起来,修改才会真正生效。",
+    "7. 写入存档:确认生效后在游戏里存档,词条数值随物品一起写入存档文件,之后读档物品由游戏用原生内存重建,不再依赖编辑器。",
+    "8. 复制上一件物品:改好一把并保存后,捡起新物品,不用点读取,直接点\"复制上一件物品\",上一件的词条会原样盖到新物品上(基础属性不复制),然后回到第 6 步生效。",
+    "9. 重置节点池(日常不用点):每次读档后点一次最保险,回收全部槽位、零风险;看到\"节点池无空闲槽\"提示时,先确认改过的物品都已扔下捡回,再点重置,然后重新保存。注意:背包里还有带新增词条的物品时不要点,会废掉那些词条。",
+};
+
+const char* const kHelpSummonSteps[] = {
+    "1. 版本差异:Steam 版支持较好,可召唤更多具体类别、攻击力普遍更强(刺客除外);v1.30 只有部分功能——不支持召唤朱厌、善翼、刺客和指定类型的秦兵,且召唤物攻击力弱、无法造成伤害、只能拉仇恨,但秦兵死亡有物品掉落。",
+    "2. 选择目标:选择要召唤的类别和具体类型(阵营可选队友/盟友),点\"激活\"。",
+    "3. 召唤:激活后,在游戏里让力士使用\"烽火狼烟\",即可召唤出对应怪物。",
+    "4. 取消:激活状态下点\"取消\",恢复烽火狼烟默认值(召唤狼)。",
+    "5. 读档后:需要重新点\"激活\",或点\"刷新召唤\"。",
+    "6. 清理召唤物:先用 GM 命令 look 查到目标 ID。队友用 dismiss {ID} 解散(推荐,直接离队,无副作用);盟友不适用 dismiss,用 kill {ID} 逐个击杀(盟友太多可用 kill all 清除,但可能误杀 NPC 甚至破坏剧情,建议逐个清理)。操作前先存档并备份 System\\game\\player_{i}.gam。",
+};
+
+const char* const kHelpGmSteps[] = {
+    "1. 激活:点\"激活\"按钮获取 GM 权限;一种方式无效时可尝试另一种,或按第 2 条手动激活(程序会静默建立 wizard.lst 文件并加入当前用户)。",
+    "2. 手动激活方法:在\"游戏目录\\System\\wizard\\wizard.lst\"里加入\"9 {用户名}\"(单机用户名为 player,文件或目录不存在可自行创建),重启游戏,在游戏中按回车依次输入\"{$objectpoq$}\"和\"r 9\",屏幕出现激活提示。",
+    "3. 执行命令:激活后在输入框输入 GM 命令,按回车或点\"执行\"按钮执行(工具内可以无视 GM 命令长度限制,但过长是否会崩溃没试过);可勾选\"执行次数\"批量执行。",
+    "4. 历史命令:输入框内按上箭头向前翻最近执行过的命令(最多缓存 30 条,执行成功才入历史),下箭头往回翻;下翻翻过最新一条会还原浏览前正在输入的内容。焦点在常用命令列表时,上下箭头留给列表不切历史。",
+    "5. 命令技巧:GM 命令可参考网上攻略,例如杀死杂货铺掌柜或铁匠铺掌柜获得装备,杀完后用创建命令恢复(名字可以用 look 看到)。",
+    "6. 常用命令:放在工具目录的 gm_cmd.txt 中(每行\"命令#显示名\",# 后为显示名可省略),会出现在\"常用命令\"下拉里供快速输入,文件可自行编辑。",
+};
+
+const char* const kHelpH2Steps[] = {
+    "1. 用途:游戏参数(如物品爆率)以加密形式存放在\"游戏目录\\Data\\\"下,本工具对这些文件原地解密/加密。",
+    "2. 解密:选择 Data 目录下的加密文件点\"解密\";转换前自动备份原文件为\"<原名>.dec.bak\"。",
+    "3. 编辑:解密后的文件是 GBK 编码的表格,请用 Excel 打开、编辑、保存;修改方法可参考论坛或其他教程。",
+    "4. 加密:编辑完成后点\"加密\"转回加密格式,同样先备份为\"<原名>.enc.bak\";改错了可以手动用 .bak 文件替换掉修改错误的文件恢复。",
+    "5. 生效:修改后需要退出游戏重新进入才生效(存档+读档是否生效未确定)。",
+};
+
+void RenderHelpPopup(App& app) {
+    static const HelpTabContent kHelpTabs[] = {
+        {"人物修改", kHelpCharSteps, 5},
+        {"道具修改", kHelpItemSteps, 9},
+        {"召唤修改", kHelpSummonSteps, 6},
+        {"GM命令", kHelpGmSteps, 6},
+        {"H2解密", kHelpH2Steps, 5},
+    };
+    // 居中且不可拖动(与其他弹窗一致的定位规则)
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("帮助", nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize |
+                                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse)) {
+        return;
+    }
+    if (ImGui::BeginTabBar("helptabs")) {
+        for (int i = 0; i < 5; ++i) {
+            // 打开后的第一帧把当前主 tab 对应的说明设为选中,之后可自由切换
+            ImGuiTabItemFlags flags = (app.help_jump && i == app.help_tab)
+                                          ? ImGuiTabItemFlags_SetSelected
+                                          : 0;
+            if (ImGui::BeginTabItem(kHelpTabs[i].name, nullptr, flags)) {
+                ImGui::Spacing();
+                ImGui::PushTextWrapPos(ImGui::GetFontSize() * 46.0f);
+                for (int s = 0; s < kHelpTabs[i].step_count; ++s) {
+                    ImGui::TextWrapped("%s", kHelpTabs[i].steps[s]);
+                    ImGui::Spacing();
+                }
+                ImGui::PopTextWrapPos();
+                ImGui::EndTabItem();
+            }
+        }
+        ImGui::EndTabBar();
+    }
+    app.help_jump = false;
+    ImGui::Separator();
+    if (ImGui::Button("关闭", ImVec2(ImGui::GetFontSize() * 6.0f, 0))) {
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
 }
 
 // ============================================================================
@@ -2790,11 +3737,13 @@ void RenderMainWindow(App& app) {
     ImGui::BeginChild("tabarea", ImVec2(avail.x, tab_h));
     app.gm_visible = false;  // 每帧先复位,GM tab 渲染时置 true(周期刷新只在可见时跑)
     if (ImGui::BeginTabBar("maintabs")) {
-        if (ImGui::BeginTabItem("属性修改")) {
+        if (ImGui::BeginTabItem("人物修改")) {
+            app.cur_tab = 0;
             RenderCharTab(app);
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("物品修改")) {
+        if (ImGui::BeginTabItem("道具修改")) {
+            app.cur_tab = 1;
             RenderBasicFields(app);
             ImGui::Separator();
             float table_h = ImGui::GetContentRegionAvail().y;
@@ -2803,28 +3752,40 @@ void RenderMainWindow(App& app) {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("召唤修改")) {
+            app.cur_tab = 2;
             RenderSummonTab(app);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("GM命令")) {
+            app.cur_tab = 3;
             RenderGmTab(app);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("H2解密")) {
+            app.cur_tab = 4;
             RenderH2Tab(app);
             ImGui::EndTabItem();
         }
+        if (!app.hidden && ImGui::BeginTabItem("gam修改")) {
+            app.cur_tab = 7;
+            RenderGamTab(app);
+            ImGui::EndTabItem();
+        }
         if (!app.hidden && ImGui::BeginTabItem("内存查看")) {
+            app.cur_tab = 5;
             RenderMemTab(app);
             ImGui::EndTabItem();
         }
         if (!app.hidden && ImGui::BeginTabItem("偏移设置")) {
+            app.cur_tab = 6;
             RenderCfgTab(app);
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
     }
     ImGui::EndChild();
+
+    RenderHelpPopup(app);
 
     // 状态栏
     ImGui::Separator();
@@ -3022,6 +3983,7 @@ int RunApp(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     if (font_bold == nullptr) font_bold = font_cn;
 
     App app;
+    app.gam_last_dir = GamLoadPrefs();
     // 常用命令下拉(工具目录 gm_cmd.txt,随工具走);格式错误行 -> 弹窗提示(有效行仍保留)
     int gm_cmd_err = LoadGmCmdList(app, /*keep_previous_on_error=*/false);
     if (gm_cmd_err > 0)
@@ -3060,7 +4022,7 @@ int RunApp(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        // F12 切换调试 tab(内存查看 / 偏移设置)
+        // F12 切换调试 tab(内存查看 / 偏移设置 / gam修改)
         if (ImGui::IsKeyPressed(ImGuiKey_F12)) app.hidden = !app.hidden;
 
         // 无敌/一击必杀定时写回(每 500ms,对所有队员)

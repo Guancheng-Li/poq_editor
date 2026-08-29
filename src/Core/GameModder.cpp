@@ -340,6 +340,10 @@ uintptr_t GameModder::GetItemPointer() {
 
 uintptr_t GameModder::GetItemBase() {
     uintptr_t p = GetItemPointer();
+    if (!cur_item_addr_)
+        throw std::runtime_error(
+            "尚未注入捕获 hook:请检查是否已点\"初始化\"(注入失败时重新初始化)。"
+            "人物修改不受影响。");
     if (p == 0 || p == 0xFFFFFFFF)
         throw std::runtime_error(
             "当前无手持物品:请在游戏中拾起物品并保持在光标上,再读取/保存。");
@@ -512,14 +516,20 @@ void GameModder::WriteBasicFields(uintptr_t item_base, const BasicState& values)
             // 强制值(箭矢:孔数=0/耐久度=-1/耐久度上限=-1),bypass clamp
             WriteField(item_base, f, f.force_when->value);
         } else if (f.max_ref) {
-            // 耐久度:有效上限 = min(254, 上限);改上限且新上限>原耐久度时补满
-            int eff_max = cap_val ? *cap_val : (f.max ? *f.max : 254);
+            // 耐久度:与耐久度上限联动。
+            // 上限为 0/-1 时强制保持一致(0 无法装备 / -1 永不损坏);
+            // 其余情况下耐久度 ≤ 上限(改上限且新上限>原耐久度时补满到上限)。
             int v = it->second;
-            if (cap_val && mem_cap && mem_dur && *cap_val != *mem_cap && *cap_val > *mem_dur) {
+            if (cap_val && (*cap_val == 0 || *cap_val == -1)) {
                 v = *cap_val;
             } else {
-                if (f.min && v < *f.min) v = *f.min;
-                if (v > eff_max) v = eff_max;
+                int eff_max = cap_val ? *cap_val : (f.max ? *f.max : 254);
+                if (cap_val && mem_cap && mem_dur && *cap_val != *mem_cap && *cap_val > *mem_dur) {
+                    v = *cap_val;
+                } else {
+                    if (f.min && v < *f.min) v = *f.min;
+                    if (v > eff_max) v = eff_max;
+                }
             }
             WriteField(item_base, f, v);
         } else if (f.conditional) {
@@ -552,7 +562,7 @@ std::vector<uintptr_t> GameModder::ReadNodeAddrs(uintptr_t item_base) {
     uintptr_t head = mem_.ReadUInt32(item_base + cfg.head_offset);
     std::vector<uintptr_t> addrs;
     uintptr_t addr = head;
-    for (uint32_t i = 0; i < cfg.max_nodes; ++i) {
+    while (true) {
         if (addr == 0 || addr == 0xFFFFFFFF || addr < 0x10000) break;
         if (std::find(addrs.begin(), addrs.end(), addr) != addrs.end()) break;  // 环保护
         addrs.push_back(addr);
@@ -592,13 +602,12 @@ std::pair<int, int> GameModder::WriteAttributes(uintptr_t item_base,
     int m = static_cast<int>(props.size());
     int written = 0;
 
-    // 1) 写前 min(m,k) 行到现有节点(并自愈:哨兵/标志/前驱指针)
+    // 1) 写前 min(m,k) 行到现有节点(并自愈:哨兵/标志)。
+    //    prev 不写:web.ct 模板实证游戏原生链表 prev 全为 0,保持游戏自己写的值。
     int minmk = std::min(m, k);
     for (int i = 0; i < minmk; ++i) {
         WriteNode(existing[static_cast<size_t>(i)], props[static_cast<size_t>(i)]);
         NormalizeNode(existing[static_cast<size_t>(i)]);
-        mem_.WriteUInt32(existing[static_cast<size_t>(i)] + cfg.prev_offset,
-                         i > 0 ? existing[static_cast<size_t>(i - 1)] : 0);
         ++written;
     }
 
@@ -614,7 +623,7 @@ std::pair<int, int> GameModder::WriteAttributes(uintptr_t item_base,
             uintptr_t addr = existing[static_cast<size_t>(i)];
             if (IsPoolNode(addr)) {
                 try {
-                    mem_.Write(addr, std::vector<unsigned char>(cfg.static_slot, 0));
+                    mem_.Write(addr, std::vector<unsigned char>(cfg.slot_size, 0));
                 } catch (...) {
                 }
             }
@@ -637,58 +646,52 @@ std::pair<int, int> GameModder::WriteAttributes(uintptr_t item_base,
     if (!can_append) return {written, need};
 
     std::set<uintptr_t> used(existing.begin(), existing.end());
-    std::optional<uintptr_t> prev =
-        k > 0 ? std::optional<uintptr_t>(existing[static_cast<size_t>(k - 1)])
-              : std::nullopt;
+    uintptr_t tail = k > 0 ? existing[static_cast<size_t>(k - 1)] : 0;
     int added = 0;
     for (int i = k; i < m; ++i) {
         uintptr_t addr = FindFreeStaticNode(used);
         if (addr == 0) continue;  // 池满/找不到空闲槽:跳过该行,不强行写
         used.insert(addr);
         WriteNode(addr, props[static_cast<size_t>(i)]);
-        // 初始化新节点的关键字段(否则游戏当"无效节点",忽略颜色、显示默认色):
-        //   prev(0x04)=前驱(头节点为 0);sentinel(0x08)=0xFFFFFFFF;node_flag(0x10)=1
-        mem_.WriteUInt32(addr + cfg.prev_offset, prev ? *prev : 0);
+        // 初始化新节点的关键字段(web.ct 模板布局):
+        //   prev(0x04)=0(原生链表 prev 全 0);sentinel(0x08)=0xFFFFFFFF;node_flag(0x10)=1
+        mem_.WriteUInt32(addr + cfg.prev_offset, 0);
         mem_.WriteUInt32(addr + cfg.sentinel_offset, 0xFFFFFFFF);
         mem_.WriteUInt32(addr + cfg.node_flag_offset, 1);
-        if (prev) {
-            mem_.WriteUInt32(*prev + cfg.next_offset, addr);
+        if (tail) {
+            mem_.WriteUInt32(tail + cfg.next_offset, addr);
         } else {
             mem_.WriteUInt32(item_base + cfg.head_offset, addr);
         }
-        prev = addr;
+        tail = addr;
         ++added;
     }
-    if (prev) mem_.WriteUInt32(*prev + cfg.next_offset, 0);
+    if (tail) mem_.WriteUInt32(tail + cfg.next_offset, 0);
     return {written + added, need - added};
 }
 
 std::pair<uintptr_t, uint32_t> GameModder::PoolCfg() {
-    // 返回当前节点池的 (base, size),按 pool_type 配置分发(无 if-else):
-    // - "static":固定静态区(static_base/static_size)。
-    // - "dynamic":VirtualAllocEx 动态分配(steam/v1.30,对齐 web.ct)——游戏不认识
-    //   这块内存、不会 free,地址每次运行时分配总是有效;分配失败返回 (0,0),调用方跳过新增。
+    // 返回当前节点池的 (base, size)。池 = 编辑器自管理的 VirtualAllocEx 动态分配
+    // (对齐 web.ct):游戏不认识这块内存、不会 free,地址每次运行时分配总是有效。
+    // 分配失败返回 (0,0),调用方跳过新增。首次需要时惰性分配一次,之后复用。
     const AttrListCfg& cfg = config_.Current().attr_list;
-    if (cfg.pool_type == "dynamic") {
-        if (!pool_base_ && mem_.IsOpen()) {
-            // 动态池:保证 ≥ 30 槽
-            uint32_t slots = std::max<uint32_t>(30, cfg.static_size / cfg.static_slot);
-            uint32_t size = slots * cfg.static_slot;
-            uintptr_t base = 0;
-            try {
-                base = mem_.Alloc(size);
-                mem_.Write(base, std::vector<unsigned char>(size, 0));
-            } catch (...) {
-                base = 0;
-            }
-            if (base) {
-                pool_base_ = base;
-                pool_size_ = size;
-            }
+    if (!pool_base_ && mem_.IsOpen()) {
+        // 动态池:保证 128 槽(slot_size 0x40 → 0x2000,够一把 50 条词条的武器 + 余量)
+        uint32_t slots = 128;
+        uint32_t size = slots * cfg.slot_size;
+        uintptr_t base = 0;
+        try {
+            base = mem_.Alloc(size);
+            mem_.Write(base, std::vector<unsigned char>(size, 0));
+        } catch (...) {
+            base = 0;
         }
-        return {pool_base_, pool_size_};
+        if (base) {
+            pool_base_ = base;
+            pool_size_ = size;
+        }
     }
-    return {cfg.static_base, cfg.static_size};
+    return {pool_base_, pool_size_};
 }
 
 bool GameModder::IsPoolNode(uintptr_t addr) {
@@ -696,13 +699,27 @@ bool GameModder::IsPoolNode(uintptr_t addr) {
     return pc.first && addr >= pc.first && addr < pc.first + pc.second;
 }
 
+bool GameModder::ResetPool() {
+    // 把动态节点池整体清零,所有槽位回到"全 0 = 空闲"状态。
+    // 用途:游戏里丢弃过武器或读档后,旧链表已废,但游戏不认识我们的池、不会替我们清零,
+    // 池槽会一直非 0 而无法复用;此时整池清零即可全部回收。
+    // 注意:若仍有存活物品的链表挂在池内,清零会废掉那些词条——只在确认不再使用后调用。
+    auto pc = PoolCfg();
+    if (!pc.first) return false;
+    try {
+        mem_.Write(pc.first, std::vector<unsigned char>(pc.second, 0));
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
 uintptr_t GameModder::FindFreeStaticNode(const std::set<uintptr_t>& used) {
-    // 在节点池里找一块全 0 的 static_slot 槽(最高地址优先,对齐槽网格)。
-    // 池由 PoolCfg() 决定(固定静态池 / 动态池);槽网格对齐 = base % static_slot,
-    // 保证我们用的槽与原版修改器后续分配的槽不错位冲突。全 0 要求自然避开已用节点/
-    // 静态数据表/锚点等非零区域,绝不写非零字节。找不到返回 0。
+    // 在节点池里找一块全 0 的 slot_size 槽(最高地址优先,对齐槽网格)。
+    // 槽网格对齐 = base % slot_size,保证我们的槽互不错位。全 0 要求自然避开已用节点,
+    // 绝不写非零字节。找不到返回 0。
     const AttrListCfg& cfg = config_.Current().attr_list;
-    uint32_t size = cfg.static_slot;
+    uint32_t size = cfg.slot_size;
     auto pc = PoolCfg();
     if (!pc.first) return 0;
     uintptr_t pool_end = pc.first + pc.second;

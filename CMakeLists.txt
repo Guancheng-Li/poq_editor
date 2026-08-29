@@ -57,6 +57,8 @@ set(PROJECT_SOURCES
     src/Core/SummonSteam.cpp
     src/Core/Summon130.cpp
     src/Core/GmCmd.cpp
+    src/Core/GamFile.cpp
+    src/Core/GamCatalog.cpp
     src/Native/ProcessMemory.cpp
 )
 
@@ -71,6 +73,8 @@ set(PROJECT_HEADERS
     src/Core/SummonSteam.h
     src/Core/Summon130.h
     src/Core/GmCmd.h
+    src/Core/GamFile.h
+    src/Core/GamCatalog.h
     src/Native/ProcessMemory.h
 )
 
@@ -97,6 +101,15 @@ set_target_properties(PoqEditorImgui PROPERTIES
     WIN32_EXECUTABLE ON
     OUTPUT_NAME "PoqEditor"
 )
+
+# 拷贝 data/*(无中生有物品目录 gam_catalog.bin)到输出目录的 data/ 子目录
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/data")
+    add_custom_command(TARGET PoqEditorImgui POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/data"
+            "$<TARGET_FILE_DIR:PoqEditorImgui>/data"
+        COMMENT "copy data (gam catalog) to output")
+endif()
 
 # 我们的 app.rc 已内嵌 requireAdministrator manifest;禁用链接器自动生成的
 # 默认 manifest,避免 CVT1100 资源重复(类型 MANIFEST 名称 1)。

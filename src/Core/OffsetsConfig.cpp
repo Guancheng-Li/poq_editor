@@ -182,16 +182,16 @@ ModeCfg OffsetsConfig::DefaultMode() {
     m.basic_fields.push_back(bf);
 
     bf = F("耐久度", 0x58, "dword");
-    bf.min = 0;
+    bf.min = -1;  // -1 为永不损坏;下限不能是 0,否则 -1 会被 clamp 成 0
     bf.max = 254;
     bf.max_ref = "耐久度上限";
     bf.force_when = ForceWhenCfg{"类型", {13, 14}, -1};
     m.basic_fields.push_back(bf);
 
     bf = F("耐久度上限", 0x5C, "dword");
-    bf.min = 0;
+    bf.min = -1;  // -1 为永不损坏;0 会导致物品无法装备,但 0 允许用户手动设置
     bf.max = 254;
-    bf.hint = "0 为永不损坏";
+    bf.hint = "-1为永不损坏，0为无耐久也无法装备";
     bf.force_when = ForceWhenCfg{"类型", {13, 14}, -1};
     m.basic_fields.push_back(bf);
 
@@ -250,9 +250,6 @@ ModeCfg OffsetsConfig::DefaultMode() {
     bf.hint = "仅类型为 13(箭)/14(矢) 时生效";
     m.basic_fields.push_back(bf);
 
-    // v1.30 也走动态节点池(VirtualAllocEx,地址每次运行时总是有效)。
-    m.attr_list.pool_type = "dynamic";
-
     return m;
 }
 
@@ -274,7 +271,6 @@ ModeCfg OffsetsConfig::SteamMode() {
     m.hook.capture = cap;
     // basic_fields 与 v1.30 相同(steam 偏移表同构)。
     m.basic_fields = DefaultMode().basic_fields;
-    m.attr_list.pool_type = "dynamic";
     return m;
 }
 

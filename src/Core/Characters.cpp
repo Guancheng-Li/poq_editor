@@ -84,9 +84,18 @@ std::vector<uint32_t> Utf8ToCodepoints(const std::string& s) {
 // ---------------------------------------------------------------------------
 // 字段表
 // ---------------------------------------------------------------------------
-const std::vector<std::string>& MemberNames() {
-    static const std::vector<std::string> kNames = {"扶苏", "孔刚", "田玥琳", "张良", "瑶彤"};
-    return kNames;
+// 全部可选队友白名单(名字 -> 职业显示名,共 16 人)。
+// 定位时槽内实际名字必须命中白名单才认(排除 NPC/杂物/脏数据);
+// 下拉显示格式 = "职业-名字"(如 刺客-荆无忌)。
+const std::map<std::string, std::string>& KnownMembers() {
+    static const std::map<std::string, std::string> kMembers = {
+        {"荆无忌", "刺客"}, {"田玥琳", "刺客"}, {"赵茜", "刺客"},
+        {"孔刚", "力士"},   {"冒顿", "力士"},   {"黥布", "力士"},
+        {"方仲", "术士"},   {"昆蒲", "术士"},   {"廖异", "术士"},   {"张良", "术士"},
+        {"淳于秋", "巫师"}, {"瑶彤", "巫师"},   {"茵珠", "巫师"},
+        {"扶苏", "游侠"},   {"韩信", "游侠"},   {"李由", "游侠"},
+    };
+    return kMembers;
 }
 
 const std::vector<CharFieldCfg>& GlobalFields() {
@@ -154,8 +163,18 @@ const std::map<std::string, std::map<std::string, uint32_t>>& MemberOffsets() {
 // ---------------------------------------------------------------------------
 // 固定偏移定位
 // ---------------------------------------------------------------------------
+namespace {
+// 去掉首尾空白(名字字段常带尾部空格/制表填充)。
+std::string TrimName(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return "";
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
+}
+}  // namespace
+
 std::vector<std::pair<std::string, uintptr_t>> LocateByOffsets(ProcessMemory& mem, unsigned int pid,
-                                                 const std::string& module) {
+                                                 const std::string& module, bool strict_filter) {
     std::vector<std::pair<std::string, uintptr_t>> result;
     auto base_opt = ProcessMemory::FindModuleBase(pid, module);
     if (!base_opt) return result;
@@ -163,13 +182,17 @@ std::vector<std::pair<std::string, uintptr_t>> LocateByOffsets(ProcessMemory& me
     auto it = MemberOffsets().find(module);
     if (it == MemberOffsets().end()) return result;
 
-    // 按偏移值升序遍历(槽位顺序),动态读每个槽位实际名字。
+    // 固定偏移只作"窗口范围"用;实际槽位通过窗口内扫描识别(更稳)。
+    // 已知偏移之间的地址可能指向非成员(如技能表),不逐档写死。
     std::vector<uint32_t> offsets;
     for (const auto& kv : it->second) offsets.push_back(kv.second);
     std::sort(offsets.begin(), offsets.end());
+    const uint32_t kScanMargin = 0x500;  // 首尾各留余量,保证覆盖真实槽位
+    uint32_t scan_lo = offsets.front();
+    uint32_t scan_hi = offsets.back() + kScanMargin;
 
     std::set<std::string> seen;  // 同名槽位合并(保留首次)
-    for (uint32_t off : offsets) {
+    for (uint32_t off = scan_lo; off <= scan_hi; off += 4) {
         try {
             unsigned int edi = mem.ReadUInt32(base + off);
             if (!(edi > 0x10000 && edi < 0xFFFFFF00)) continue;
@@ -177,21 +200,93 @@ std::vector<std::pair<std::string, uintptr_t>> LocateByOffsets(ProcessMemory& me
             unsigned int np = mem.ReadUInt32(struct_base);  // 姓名指针 @ +0x00
             if (!(np > 0x10000 && np < 0xFFFFFF00)) continue;
             auto s_opt = mem.ReadStringGbk(np, 40, 936);
-            if (!s_opt || s_opt->empty() || *s_opt == "未知" || *s_opt == "未知物品") continue;
-            // 有效角色校验:等级 1-99、生命/精气合理(排除空槽 FFFFFFFF 残留)
-            unsigned int lvl = mem.ReadUInt32(struct_base + 0x0C);
-            unsigned int hp = mem.ReadUInt32(struct_base + 0x30);
-            unsigned int mp = mem.ReadUInt32(struct_base + 0x38);
-            if (!(lvl >= 1 && lvl <= 99 && hp >= 1 && hp <= 99999 && mp >= 1 && mp <= 99999)) continue;
+            if (!s_opt) continue;
+            std::string name = TrimName(*s_opt);  // 名字字段常带尾部空格,先 Trim
+            if (name.empty()) continue;
+            // 白名单过滤(开关控制):名字必须是 16 个可选队友之一
+            // (排除 NPC/杂物/脏数据;游戏槽位会随存档换人,不能按偏移写死身份)。
+            // 关闭时不过滤(可能识别出其他角色,UI 上有开关+警告)。
+            if (strict_filter && !KnownMembers().count(name)) continue;
+            // 有效角色校验:等级 1-99(排除空槽残留)。
+            // 生命/精气不校验:阵亡(hp=0)或被修改器改大(>99999)都是正常状态,
+            // 之前的上下限过滤会把这类成员从列表里挤掉(如只剩 3 人)。
+            if (strict_filter) {
+                unsigned int lvl = mem.ReadUInt32(struct_base + 0x0C);
+                if (!(lvl >= 1 && lvl <= 99)) continue;
+            }
             // 同名槽位合并(保留首次)
-            if (seen.count(*s_opt)) continue;
-            seen.insert(*s_opt);
-            result.emplace_back(*s_opt, struct_base);
+            if (seen.count(name)) continue;
+            seen.insert(name);
+            result.emplace_back(name, struct_base);
         } catch (...) {
             continue;
         }
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// 调试辅助:不过滤地按槽位顺序读名字 + 校验详情
+// ---------------------------------------------------------------------------
+std::vector<std::string> ProbeSlotNames(ProcessMemory& mem, unsigned int pid,
+                                        const std::string& module) {
+    std::vector<std::string> out;
+    auto base_opt = ProcessMemory::FindModuleBase(pid, module);
+    if (!base_opt) return out;
+    uintptr_t base = *base_opt;
+    auto it = MemberOffsets().find(module);
+    if (it == MemberOffsets().end()) return out;
+
+    std::vector<uint32_t> offsets;
+    for (const auto& kv : it->second) offsets.push_back(kv.second);
+    std::sort(offsets.begin(), offsets.end());
+
+    // 与定位一致:扫描整个窗口(而非逐档),显示每个槽位读到的内容。
+    const uint32_t kScanMargin = 0x500;
+    const uint32_t scan_lo = offsets.front();
+    const uint32_t scan_hi = offsets.back() + kScanMargin;
+
+    for (uint32_t off = scan_lo; off <= scan_hi; off += 4) {
+        try {
+            unsigned int edi = mem.ReadUInt32(base + off);
+            if (!(edi > 0x10000 && edi < 0xFFFFFF00)) {
+                out.emplace_back("槽无效");
+                continue;
+            }
+            uintptr_t struct_base = edi + 0x28;
+            unsigned int np = mem.ReadUInt32(struct_base);
+            if (!(np > 0x10000 && np < 0xFFFFFF00)) {
+                out.emplace_back("名字指针无效");
+                continue;
+            }
+            auto s_opt = mem.ReadStringGbk(np, 40, 936);
+            if (!s_opt) {
+                out.emplace_back("名字读失败");
+                continue;
+            }
+            std::string name = TrimName(*s_opt);
+            unsigned int lvl = 0;
+            try {
+                lvl = mem.ReadUInt32(struct_base + 0x0C);
+            } catch (...) {
+            }
+            std::string line;
+            if (name.empty()) {
+                line = "(空名字)";
+            } else {
+                line = "\"" + name + "\" 等级=" + std::to_string(lvl);
+                bool in_wl = KnownMembers().count(name) != 0;
+                bool lvl_ok = lvl >= 1 && lvl <= 99;
+                line += std::string("\n  白名单:") + (in_wl ? "过" : "×不认") +
+                        " 等级:" + (lvl_ok ? "过" : "×") +
+                        (in_wl && lvl_ok ? " → 可收" : " → 被过滤");
+            }
+            out.push_back(line);
+        } catch (...) {
+            out.emplace_back("读取异常");
+        }
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------
