@@ -4,16 +4,16 @@ rem  PoqEditor (imgui single-file) build script
 rem    Uses VS 18 2026 + MSVC /MT static runtime
 rem    Output 1: build\Release\PoqEditor.exe    (single exe, no DLL deps)
 rem    Output 2 (pack only): build\Release\PoqEditor\ + .7z
-rem  ÓÃ·¨:
-rem    build.bat            Ä¬ÈÏÖ»±àÒë(²»´ò°ü),ÈÕ³£¿ª·¢ÓÃ
-rem    build.bat pack       ±àÒë + ´ò°ü(7z)
+rem  ï¿½Ã·ï¿½:
+rem    build.bat            Ä¬ï¿½ï¿½Ö»ï¿½ï¿½ï¿½ï¿½(ï¿½ï¿½ï¿½ï¿½ï¿½),ï¿½Õ³ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+rem    build.bat pack       ï¿½ï¿½ï¿½ï¿½ + ï¿½ï¿½ï¿½(7z)
 rem ============================================================
 setlocal
 set ROOT=%~dp0
 set BUILD=%ROOT%build
 set RELEASE=%BUILD%\Release
 
-rem ²ÎÊý: pack = ±àÒë+´ò°ü; È±Ê¡ = Ö»±àÒë
+rem ï¿½ï¿½ï¿½ï¿½: pack = ï¿½ï¿½ï¿½ï¿½+ï¿½ï¿½ï¿½; È±Ê¡ = Ö»ï¿½ï¿½ï¿½ï¿½
 set PACK=0
 if /i "%~1"=="pack" set PACK=1
 
@@ -34,6 +34,9 @@ if not exist "%SZIP%" (
 )
 :build
 
+rem [0/2] delete old exe files before each build (avoid stale-inject reuse)
+del /q "%RELEASE%\*.exe" 2>nul
+del /q "%RELEASE%\PoqEditor\*.exe" 2>nul
 echo [1/2] configuring with Visual Studio 18 2026 (x64) ...
 cmake -S "%ROOT%." -B "%BUILD%" -G "Visual Studio 18 2026" -A x64 -DIMGUI_DIR=%IMGUI_DIR%
 if errorlevel 1 goto :err
@@ -57,7 +60,7 @@ copy /y "%RELEASE%\PoqEditor.exe" "%STAGE%\" >nul || goto :err
 copy /y "%ROOT%readme.txt" "%STAGE%\readme.txt" >nul || goto :err
 copy /y "%ROOT%readme.txt" "%BUILD%\readme.txt" >nul || goto :err
 
-rem Éú³É PoqEditor.exe.sig (MD5 Ð£ÑéÖµ),Ëæ°ü·¢²¼
+rem ï¿½ï¿½ï¿½ï¿½ PoqEditor.exe.sig (MD5 Ð£ï¿½ï¿½Öµ),ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 set "MD5="
 for /f "skip=1 tokens=1" %%i in ('certutil -hashfile "%STAGE%\PoqEditor.exe" MD5') do if not defined MD5 set "MD5=%%i"
 > "%STAGE%\PoqEditor.exe.sig" echo %MD5%
@@ -80,7 +83,7 @@ echo    release: %RELEASE%\PoqEditor.7z  (max-compressed, outermost=PoqEditor)
 echo    readme:  %BUILD%\readme.txt
 goto :showend
 :shownopack
-echo    (Ö»±àÒë,Î´´ò°ü¡£Òª´ò°üÇëÔËÐÐ: build.bat pack )
+echo    (Ö»ï¿½ï¿½ï¿½ï¿½,Î´ï¿½ï¿½ï¿½ï¿½ï¿½Òªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: build.bat pack )
 :showend
 echo ============================================================
 exit /b 0

@@ -171,9 +171,14 @@ TemplateLoadResult JsonTemplate::Load(const std::string& path,
             const json::Value* color_v = item.Find("颜色");
             const json::Value* name_v = item.Find("属性名");
             const json::Value* type_v = item.Find("类型");
+            const json::Value* active_v = item.Find("激活");
             std::string color_txt = color_v && color_v->IsString() ? color_v->string : "";
             std::string name_txt = name_v && name_v->IsString() ? name_v->string : "";
             std::string type_txt = type_v && type_v->IsString() ? type_v->string : "";
+            // 激活状态可选;缺省(-1)时按颜色决定(见下方 color 解析后)
+            int active_field = -1;
+            if (active_v && active_v->IsNumber()) active_field = (active_v->number != 0) ? 1 : 0;
+            else if (active_v && active_v->IsBool()) active_field = active_v->boolean ? 1 : 0;
             // 属性值可选,缺省 0(对应 Python 的 item.get("属性值", 0))
             const json::Value* value_raw = item.Find("属性值");
             json::Value value_default = json::Value::MakeNumber(0);
@@ -194,7 +199,12 @@ TemplateLoadResult JsonTemplate::Load(const std::string& path,
                     " 属性值=" + JsonValueRepr(value) + "),跳过");
                 continue;
             }
-            result.attrs.push_back(ItemProperty(0, *aid, static_cast<uint32_t>(*color),
+            // 缺省激活状态:旧模板无"激活"字段时,浅蓝色(color=2)默认未激活,其它颜色默认激活
+            // (flag=0 对非浅蓝词条可能被游戏当隐藏,保持 1 安全)。
+            uint32_t active = (active_field >= 0)
+                                  ? static_cast<uint32_t>(active_field)
+                                  : ((*color == 2) ? 0u : 1u);
+            result.attrs.push_back(ItemProperty(0, *aid, static_cast<uint32_t>(*color), active,
                                                 static_cast<uint32_t>(*prec), *val));
         }
     }
@@ -246,6 +256,7 @@ void JsonTemplate::Save(const std::string& path, const BasicState& basic_state,
     for (const ItemProperty& p : attrs) {
         json::Value o = json::Value::MakeObject();
         o.Set("颜色", json::Value::MakeString(ItemData::ColorDisplay(static_cast<int>(p.color))));
+        o.Set("激活", json::Value::MakeNumber(static_cast<double>(p.active ? 1 : 0)));
         o.Set("属性名", json::Value::MakeString(ItemData::AttrDisplay(p.attr_id)));
         o.Set("类型", json::Value::MakeString(ItemData::PercentDisplay(static_cast<int>(p.precent))));
         o.Set("属性值", ToJsonValue(p.value));

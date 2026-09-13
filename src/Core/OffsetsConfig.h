@@ -36,6 +36,12 @@ struct HookCfg {
     uint32_t weight_offset = 0xF8;          // 兼容旧配置:未写 capture 时的重量字段偏移
     uint32_t weight_max = 1000;             // 兼容旧配置:重量上限
     std::optional<CaptureCfg> capture;      // 捕获条件;未设置视为 weight 类型(用 weight_* 兜底)
+    // 背包拿起门:仅当 [flag_module+flag_offset] == flag_value 时才捕获。
+    // steam 实测 POQ.exe+0x261F84:0=未从背包拿物品(悬停/地上捡),1=正从背包拿起(手持)。
+    // 用于区分"真正选取"与"悬停"——悬停/场景读取时 flag=0 直接跳过,钩子不再被污染。
+    std::string flag_module;                // 空 = 不启用该门
+    uint32_t flag_offset = 0;
+    uint32_t flag_value = 1;
 };
 
 /// 条件字段配置:{"field": <label>, "values": [..]}(对应 Python 的 conditional)。

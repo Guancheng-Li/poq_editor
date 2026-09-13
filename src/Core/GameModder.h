@@ -60,6 +60,14 @@ public:
     /// 读取 cur_item 槽 = 当前物品指针(0 表示当前无物品)。
     uintptr_t GetItemPointer();
 
+    /// 捕获后冻结支持(自注入的 cave 带冻结闸门):成功后读取可冻结防被覆盖。
+    bool CaptureFreezeSupported() const { return freeze_addr_ != 0; }
+    /// 冻结/解冻捕获:冻结后钩子不再写 cur_item 槽(防场景/背包读取顶掉手持物品)。
+    void SetCaptureFrozen(bool on);
+    /// 背包拿起边缘门已启用(steam 的 POQ.exe+0x261F84):只在 flag 0<->1 变化瞬间捕获,
+    /// 悬停/场景读取(flag 平直)一律跳过。启用时读取直接用闩锁即可,无需再等捕获。
+    bool BagFlagActive() const { return bag_flag_active_; }
+
     /// 物品基址 = 物品指针 + item_base_adjust(默认 0)。
     ///
     /// Throws std::runtime_error: 当前无物品(指针 0/0xFFFFFFFF)。
@@ -108,7 +116,12 @@ private:
     void Inject();
     static std::vector<unsigned char> BuildCave(uintptr_t cur_item_addr, uintptr_t cave_addr,
                                                 uintptr_t return_addr, uint8_t disp,
-                                                const CaptureCfg& capture);
+                                                const CaptureCfg& capture,
+                                                uintptr_t freeze_addr = 0,
+                                                uintptr_t bag_flag_addr = 0,
+                                                uint32_t bag_flag_value = 1,
+                                                uintptr_t flag_last_addr = 0,
+                                                uintptr_t flag_arm_addr = 0);
     uintptr_t FindCurItemSlot(uintptr_t hook_addr);
 
     // 捕获条件注册表:capture.type -> 生成"判断 + 捕获"段字节函数
@@ -141,6 +154,10 @@ private:
     unsigned int pid_ = 0;
     uintptr_t hook_addr_ = 0;
     uintptr_t cur_item_addr_ = 0;  // cur_item 槽地址
+    uintptr_t freeze_addr_ = 0;    // 冻结闸门地址(自注入 cave 内;0=不支持)
+    uintptr_t flag_last_addr_ = 0; // 背包拿起flag的"上次值"持久化dword(cave 边缘判断用)
+    uintptr_t flag_arm_addr_ = 0;  // 边缘后的"捕获臂"计数(0=未武装;>0=下一拍捕获一次)
+    bool bag_flag_active_ = false; // 背包拿起边缘门已启用
     uintptr_t alloc_base_ = 0;     // 自注入分配的基址(用于释放)
     uintptr_t pool_base_ = 0;      // 动态节点池基址
     uint32_t pool_size_ = 0;       // 动态节点池大小

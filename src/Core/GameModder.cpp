@@ -130,12 +130,57 @@ uintptr_t GameModder::Initialize(unsigned int pid) {
 void GameModder::EnsureInjection() {
     auto orig = mem_.Read(hook_addr_, 5);
     if (orig[0] == 0xE9) {
-        // 已注入(CT / 上次残留):复用,不重复 patch
         uintptr_t slot = FindCurItemSlot(hook_addr_);
         if (!slot)
             throw std::runtime_error(
                 "检测到 hook 已注入(0xE9),但无法从 cave 解析 cur_item 槽。"
                 "请确认注入脚本/cave 结构正常。");
+        // 旧版残留自检:配置了背包门(steam/1.30)时,现有 cave 必须含对应 flag 引用;
+        // 否则是更早版本工具注入的旧 cave(无边缘门),复用等于白注入——恢复原指令后重注入。
+        const HookCfg& hk = config_.Current().hook;
+        bool stale = false;
+        if (!hk.flag_module.empty() && hk.flag_offset) {
+            auto fb = ProcessMemory::FindModuleBase(pid_, hk.flag_module);
+            uint32_t want = (fb && *fb) ? (uint32_t)(*fb + hk.flag_offset) : 0;
+            if (want) {
+                int32_t rel = (int32_t)(orig[1]) | ((int32_t)orig[2] << 8) |
+                              ((int32_t)orig[3] << 16) | ((int32_t)orig[4] << 24);
+                uintptr_t cave_addr = (uintptr_t)((hook_addr_ + 5 + rel) & 0xFFFFFFFFULL);
+                bool found = false;
+                try {
+                    auto cave = mem_.Read(cave_addr, 128);
+                    for (size_t i = 0; i + 4 <= cave.size() && !found; ++i) {
+                        uint32_t v = (uint32_t)cave[i] | ((uint32_t)cave[i + 1] << 8) |
+                                     ((uint32_t)cave[i + 2] << 16) | ((uint32_t)cave[i + 3] << 24);
+                        if (v == want) found = true;
+                    }
+                } catch (...) {
+                }
+                stale = !found;
+            }
+        }
+        if (stale) {
+            // 从旧 cave 尾部恢复原指令 8B 44 86 <disp> 5E,再注入新版
+            int32_t rel = (int32_t)(orig[1]) | ((int32_t)orig[2] << 8) |
+                          ((int32_t)orig[3] << 16) | ((int32_t)orig[4] << 24);
+            uintptr_t cave_addr = (uintptr_t)((hook_addr_ + 5 + rel) & 0xFFFFFFFFULL);
+            try {
+                auto cave = mem_.Read(cave_addr, 128);
+                for (size_t i = 0; i + 5 <= cave.size(); ++i) {
+                    if (cave[i] == 0x8B && cave[i + 1] == 0x44 && cave[i + 2] == 0x86 &&
+                        cave[i + 4] == 0x5E) {
+                        std::vector<unsigned char> o = {0x8B, 0x44, 0x86, cave[i + 3], 0x5E};
+                        mem_.Write(hook_addr_, o);
+                        orig_bytes_ = o;
+                        Inject();
+                        return;
+                    }
+                }
+            } catch (...) {
+            }
+            throw std::runtime_error(
+                "检测到旧版注入残留且无法自动恢复原指令,请重启游戏后再初始化。");
+        }
         cur_item_addr_ = slot;
     } else if (IsHookOriginal(orig)) {
         // 原指令:自注入(用实际位移重建 cave)
@@ -158,11 +203,17 @@ bool GameModder::IsHookOriginal(const std::vector<unsigned char>& orig) {
 
 void GameModder::Inject() {
     uint8_t disp = orig_bytes_[3];  // 原指令的位移字节(1E/30 等)
-    const uint32_t alloc_size = 0x80;
+    const uint32_t alloc_size = 0x100;
     alloc_base_ = mem_.Alloc(alloc_size, hook_addr_);
     cur_item_addr_ = alloc_base_;
+    freeze_addr_ = alloc_base_ + 0x80;     // 冻结闸门 dword
+    flag_last_addr_ = alloc_base_ + 0x84;  // 背包flag"上次值"持久化 dword
+    flag_arm_addr_ = alloc_base_ + 0x88;   // 边缘后捕获臂计数 dword
     uintptr_t cave_addr = alloc_base_ + 4;
     mem_.WriteUInt32(cur_item_addr_, 0);
+    mem_.WriteUInt32(freeze_addr_, 0);
+    mem_.WriteUInt32(flag_last_addr_, 0);
+    mem_.WriteUInt32(flag_arm_addr_, 0);
     uintptr_t return_addr = hook_addr_ + 5;
     // 捕获条件:未配置 capture 时按 weight 类型,用 hook.weight_offset/weight_max 兜底
     const HookCfg& hk = config_.Current().hook;
@@ -171,13 +222,36 @@ void GameModder::Inject() {
         cap.offset = hk.capture ? hk.capture->offset : hk.weight_offset;
         cap.max = hk.capture ? hk.capture->max : hk.weight_max;
     }
-    auto cave = BuildCave(cur_item_addr_, cave_addr, return_addr, disp, cap);
+    // 背包拿起边缘门地址(steam: POQ.exe+0x261F84);模块解析不到则关闭该门。
+    uintptr_t bag_flag_addr = 0;
+    bag_flag_active_ = false;
+    if (!hk.flag_module.empty() && hk.flag_offset) {
+        auto fbase = ProcessMemory::FindModuleBase(pid_, hk.flag_module);
+        if (fbase && *fbase) {
+            bag_flag_addr = *fbase + hk.flag_offset;
+            bag_flag_active_ = true;
+            try {
+                mem_.WriteUInt32(flag_last_addr_, mem_.ReadUInt32(bag_flag_addr));
+            } catch (...) {
+            }
+        }
+    }
+    auto cave = BuildCave(cur_item_addr_, cave_addr, return_addr, disp, cap, freeze_addr_,
+                          bag_flag_addr, hk.flag_value, flag_last_addr_, flag_arm_addr_);
     mem_.Write(cave_addr, cave);
     uint32_t jmp_rel = static_cast<uint32_t>(cave_addr - return_addr);
     std::vector<unsigned char> jmp;
     jmp.push_back(0xE9);
     AppendLe32(jmp, jmp_rel);
     mem_.Write(hook_addr_, jmp);
+}
+
+void GameModder::SetCaptureFrozen(bool on) {
+    if (!freeze_addr_) return;
+    try {
+        mem_.WriteUInt32(freeze_addr_, on ? 1u : 0u);
+    } catch (...) {
+    }
 }
 
 std::map<std::string, GameModder::CaptureBuilder> GameModder::CaptureBuilders() {
@@ -245,13 +319,88 @@ std::vector<unsigned char> GameModder::BuildCapItemType(uintptr_t cur_item_addr,
 
 std::vector<unsigned char> GameModder::BuildCave(uintptr_t cur_item_addr, uintptr_t cave_addr,
                                                  uintptr_t return_addr, uint8_t disp,
-                                                 const CaptureCfg& capture) {
+                                                 const CaptureCfg& capture,
+                                                 uintptr_t freeze_addr,
+                                                 uintptr_t bag_flag_addr,
+                                                 uint32_t bag_flag_value,
+                                                 uintptr_t flag_last_addr,
+                                                 uintptr_t flag_arm_addr) {
     // "判断 + 捕获"段由捕获条件注册表按 capture.type 生成(无 if-else);
     // 这里只负责拼接原指令段(与 CT 等价)和 jmp 回跳。
     auto it = CaptureBuilders().find(capture.type);
     if (it == CaptureBuilders().end())
         throw std::runtime_error("未知捕获条件类型: " + capture.type + "(配置 hook.capture.type)");
-    std::vector<unsigned char> cave = it->second(cur_item_addr, capture);
+    std::vector<unsigned char> capture_code = it->second(cur_item_addr, capture);
+    size_t capt_end = capture_code.size();  // 捕获段的 "code:" 标签位置
+    std::vector<unsigned char> cave;
+    // 跳转占位:(rel 字节位置, kind) kind: 0=.noedge  1=.skip
+    std::vector<std::pair<size_t, int>> jmp8;
+    std::vector<std::pair<size_t, int>> jmp32;
+    size_t noedge_label = 0;  // .noedge 标签位置(边缘判定后、"cmp [arm],0" 处)
+    auto emit8 = [&](int kind) {
+        jmp8.emplace_back(cave.size(), kind);
+        cave.push_back(0x00);
+    };
+    auto emit32 = [&](int kind) {
+        jmp32.emplace_back(cave.size(), kind);
+        cave.push_back(0x00); cave.push_back(0x00);
+        cave.push_back(0x00); cave.push_back(0x00);
+    };
+    if (freeze_addr) {
+        // 冻结门: freeze!=0 跳过捕获段。cmp dword [freeze],0 ; jne skip
+        cave.push_back(0x83); cave.push_back(0x3D);
+        AppendLe32(cave, static_cast<uint32_t>(freeze_addr));
+        cave.push_back(0x00);
+        cave.push_back(0x75);
+        emit8(1);
+    }
+    if (bag_flag_addr) {
+        // 背包拿起臂窗门(容忍 flag 先/后于读属性):
+        //   0->1 边缘 -> 记 last、设 arm=1、jmp skip(本拍不捕);下一拍 arm==1 -> arm=0 捕获一次。
+        //   悬停/场景期 flag 平直 -> 无边缘且 arm 早已 0 -> 一律跳过,不入闩锁。
+        // ecx=临时寄存器(原指令只重写 eax/esi,不依赖 ecx)。
+        cave.push_back(0x8B); cave.push_back(0x0D);              // mov ecx,[flag]
+        AppendLe32(cave, static_cast<uint32_t>(bag_flag_addr));
+        cave.push_back(0x3B); cave.push_back(0x0D);              // cmp ecx,[last]
+        AppendLe32(cave, static_cast<uint32_t>(flag_last_addr));
+        cave.push_back(0x74);                                   // je .noedge
+        emit8(0);
+        cave.push_back(0x89); cave.push_back(0x0D);              // mov [last],ecx
+        AppendLe32(cave, static_cast<uint32_t>(flag_last_addr));
+        cave.push_back(0x83); cave.push_back(0xF9);              // cmp ecx,value
+        cave.push_back(static_cast<unsigned char>(bag_flag_value & 0xFF));
+        cave.push_back(0x75);                                   // jne .noedge
+        emit8(0);
+        cave.push_back(0xC7); cave.push_back(0x05);              // mov dword [arm],1
+        AppendLe32(cave, static_cast<uint32_t>(flag_arm_addr));
+        cave.push_back(0x01); cave.push_back(0x00); cave.push_back(0x00); cave.push_back(0x00);
+        cave.push_back(0xE9);                                   // jmp .skip (rel32)
+        emit32(1);
+        // .noedge:
+        noedge_label = cave.size();
+        cave.push_back(0x83); cave.push_back(0x3D);              // cmp dword [arm],0
+        AppendLe32(cave, static_cast<uint32_t>(flag_arm_addr));
+        cave.push_back(0x00);
+        cave.push_back(0x74);                                   // je .skip
+        emit8(1);
+        cave.push_back(0xC7); cave.push_back(0x05);              // mov dword [arm],0
+        AppendLe32(cave, static_cast<uint32_t>(flag_arm_addr));
+        cave.push_back(0x00); cave.push_back(0x00); cave.push_back(0x00); cave.push_back(0x00);
+    }
+    size_t capture_start = cave.size();
+    cave.insert(cave.end(), capture_code.begin(), capture_code.end());
+    size_t skip = capture_start + capt_end;
+    for (auto& e : jmp8) {
+        size_t target = (e.second == 0) ? noedge_label : skip;
+        cave[e.first] = static_cast<unsigned char>(((target - (e.first + 1)) & 0xFF));
+    }
+    for (auto& e : jmp32) {
+        size_t rel = skip - (e.first + 4);
+        cave[e.first + 0] = static_cast<unsigned char>((rel) & 0xFF);
+        cave[e.first + 1] = static_cast<unsigned char>((rel >> 8) & 0xFF);
+        cave[e.first + 2] = static_cast<unsigned char>((rel >> 16) & 0xFF);
+        cave[e.first + 3] = static_cast<unsigned char>((rel >> 24) & 0xFF);
+    }
     cave.push_back(0x8B); cave.push_back(0x44);                 // mov eax,[esi+eax*4+disp]
     cave.push_back(0x86); cave.push_back(disp & 0xFF);
     cave.push_back(0x5E);                                       // pop esi
@@ -272,7 +421,7 @@ uintptr_t GameModder::FindCurItemSlot(uintptr_t hook_addr) {
     uintptr_t cave_addr = static_cast<uintptr_t>((hook_addr + 5 + rel) & 0xFFFFFFFFULL);
     std::vector<unsigned char> cave;
     try {
-        cave = mem_.Read(cave_addr, 64);
+        cave = mem_.Read(cave_addr, 128);
     } catch (...) {
         return 0;
     }
@@ -578,11 +727,12 @@ std::vector<ItemProperty> GameModder::ReadAttributes(uintptr_t item_base) {
         try {
             uint32_t aid = mem_.ReadUInt32(addr + cfg.id_offset);
             uint32_t color = mem_.ReadUInt32(addr + cfg.color_offset);
+            uint32_t flag = mem_.ReadUInt32(addr + cfg.node_flag_offset);
             // precent 在 CT 中是 Float 类型,按 float 读再转 0/1
             float prec_f = mem_.ReadFloat(addr + cfg.precent_offset);
             uint32_t prec = prec_f != 0.0f ? 1 : 0;
             float val = mem_.ReadFloat(addr + cfg.value_offset);
-            result.push_back(ItemProperty(addr, aid, color, prec, val));
+            result.push_back(ItemProperty(addr, aid, color, flag ? 1u : 0u, prec, val));
         } catch (...) {
             continue;
         }
@@ -653,11 +803,11 @@ std::pair<int, int> GameModder::WriteAttributes(uintptr_t item_base,
         if (addr == 0) continue;  // 池满/找不到空闲槽:跳过该行,不强行写
         used.insert(addr);
         WriteNode(addr, props[static_cast<size_t>(i)]);
-        // 初始化新节点的关键字段(web.ct 模板布局):
-        //   prev(0x04)=0(原生链表 prev 全 0);sentinel(0x08)=0xFFFFFFFF;node_flag(0x10)=1
+        // 初始化新节点的链表/哨兵字段(web.ct 模板布局):
+        //   prev(0x04)=0(原生链表 prev 全 0);sentinel(0x08)=0xFFFFFFFF。
+        //   node_flag(0x10) 由 WriteNode 按 p.active 写入,勿在此强制为 1。
         mem_.WriteUInt32(addr + cfg.prev_offset, 0);
         mem_.WriteUInt32(addr + cfg.sentinel_offset, 0xFFFFFFFF);
-        mem_.WriteUInt32(addr + cfg.node_flag_offset, 1);
         if (tail) {
             mem_.WriteUInt32(tail + cfg.next_offset, addr);
         } else {
@@ -750,24 +900,25 @@ uintptr_t GameModder::FindFreeStaticNode(const std::set<uintptr_t>& used) {
 }
 
 void GameModder::WriteNode(uintptr_t addr, const ItemProperty& p) {
-    // 写节点字段值。id/color 为 DWORD,precent/value 为 Float(对齐 CT)。
+    // 写节点字段值。id/color/active 为 DWORD,precent/value 为 Float(对齐 CT)。
     const AttrListCfg& cfg = config_.Current().attr_list;
     mem_.WriteUInt32(addr + cfg.id_offset, p.attr_id);
     mem_.WriteUInt32(addr + cfg.color_offset, p.color);
+    mem_.WriteUInt32(addr + cfg.node_flag_offset, p.active ? 1u : 0u);  // 隐藏/激活
     // precent 在 CT 中是 Float:写 1.0/0.0,而非 uint32 1(否则游戏按 float 读得到非零垃圾值)
     mem_.WriteFloat(addr + cfg.precent_offset, p.precent ? 1.0f : 0.0f);
     mem_.WriteFloat(addr + cfg.value_offset, p.value);
 }
 
 void GameModder::NormalizeNode(uintptr_t addr) {
-    // 自愈:确保节点是"有效"的——sentinel(0x08)=0xFFFFFFFF、node_flag(0x10)=1。
-    // 否则游戏把节点当无效,忽略其 0x14 颜色、显示默认色(实测蓝)。幂等。
+    // 自愈:确保 sentinel(0x08)=0xFFFFFFFF(游戏据此判定节点有效)。
+    // 注意:node_flag(0x10) 是"隐藏/激活"状态位(0=隐藏/未激活->存档成 [H..],1=激活->[C..]),
+    // 实测泰阿剑隐藏会心一击 flag=0 / 龙渊剑激活 flag=1。绝不能写死为 1,否则保存会把
+    // 未激活的隐藏词条全部激活。此函数只修 sentinel,不动 flag。
     const AttrListCfg& cfg = config_.Current().attr_list;
     try {
         if (mem_.ReadUInt32(addr + cfg.sentinel_offset) != 0xFFFFFFFF)
             mem_.WriteUInt32(addr + cfg.sentinel_offset, 0xFFFFFFFF);
-        if (mem_.ReadUInt32(addr + cfg.node_flag_offset) != 1)
-            mem_.WriteUInt32(addr + cfg.node_flag_offset, 1);
     } catch (...) {
     }
 }

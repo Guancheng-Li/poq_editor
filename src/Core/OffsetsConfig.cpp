@@ -145,7 +145,21 @@ ModeCfg OffsetsConfig::DefaultMode() {
     ModeCfg m;
     m.name = "v1.30";
     m.item_base_adjust = 0;
-    m.hook.capture = CaptureCfg{};  // weight:重量 <= 1000 才捕获
+    // 1.30 也按 item_type 捕获(与 steam 一致:标记==101,类型 0-52);不用重量过滤(<1000 会漏)。
+    {
+        CaptureCfg cap;
+        cap.type = "item_type";
+        cap.mark_offset = 0x1C;
+        cap.mark_value = 101;
+        cap.type_offset = 0xFC;
+        cap.type_min = 0;
+        cap.type_max = 52;
+        m.hook.capture = cap;
+    }
+    // 背包拿起边缘门(1.30):[POQ.exe+0x26DABC]==1 表示正在从背包拿起物品(手持)。
+    m.hook.flag_module = "POQ.exe";
+    m.hook.flag_offset = 0x26DABC;
+    m.hook.flag_value = 1;
 
     auto F = [](const char* label, uint32_t offset, const char* type) {
         BasicFieldCfg f;
@@ -264,11 +278,15 @@ ModeCfg OffsetsConfig::SteamMode() {
     cap.mark_offset = 0x1C;
     cap.mark_value = 101;
     cap.type_offset = 0xFC;
-    // 放宽到全部物品类型(原 [7,34] 只能捕获武器/防具,木材/矿石等打造材料读不到):
-    // 0 宝石,1-5 打造材料,7-24 武器,25-34 防具,51 肉类药品,52 打造杂项。
+    // 类型限制同 v1.30:0-52(宝石/材料/武器/防具/药品等;53+ 的不算道具)。
     cap.type_min = 0;
     cap.type_max = 52;
     m.hook.capture = cap;
+    // 背包拿起门(steam):[POQ.exe+0x261F84]==1 表示正在从背包拿起物品(手持),
+    // 悬停/场景/地上捡起时为 0。用它把"悬停读取"排除在捕获之外。
+    m.hook.flag_module = "POQ.exe";
+    m.hook.flag_offset = 0x261F84;
+    m.hook.flag_value = 1;
     // basic_fields 与 v1.30 相同(steam 偏移表同构)。
     m.basic_fields = DefaultMode().basic_fields;
     return m;

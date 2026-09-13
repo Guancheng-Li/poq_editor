@@ -292,6 +292,10 @@ struct App {
     std::vector<ItemProperty> attrs;
     std::vector<bool> attr_sel;
 
+    // ---- 捕获后冻结 ----
+    // 「读取属性」按下后:解冻->清槽->等一次捕获(手持物品被游戏读取)->读取->冻结。
+    // 识别只发生一次;冻结后不再被悬停/场景读取顶掉。
+
     // ---- 上一件物品属性缓存 ----
     // 每次读取(或保存)成功时快照一份;"复制上一件物品"把它写到当前物品上。
     std::vector<ItemProperty> last_attrs;
@@ -531,12 +535,32 @@ std::optional<unsigned int> FindPoqPid(const App& app) {
     return std::nullopt;
 }
 
+// 按游戏实际加载的引擎模块自动选版本模式:EasyRPG.dll=Steam(mode1),EasyRPG116.dll=v1.30(mode0)。
+// 两版本 hook/flag 偏移不同,自动选避免用户手选错。
+static void AutoSelectMode(App& app, unsigned int pid) {
+    std::string want;
+    if (ProcessMemory::FindModuleBase(pid, "EasyRPG.dll")) want = "mode1";
+    else if (ProcessMemory::FindModuleBase(pid, "EasyRPG116.dll")) want = "mode0";
+    if (want.empty() || want == app.cfg.current_mode) return;
+    app.cfg.SetCurrent(want);
+    app.modder.Config() = app.cfg;
+    app.basic_fields = app.cfg.Current().basic_fields;
+    app.RebuildBasic();
+    app.ReloadCfgBuffers();
+    for (size_t i = 0; i < app.mode_ids.size(); ++i)
+        if (app.mode_ids[i] == want) {
+            app.mode_selected = static_cast<int>(i);
+            break;
+        }
+}
+
 void OnInit(App& app) {
     auto pid = TryGetSelectedPid(app);
     if (!pid) {
         app.SetStatus("请先选择一个进程。");
         return;
     }
+    AutoSelectMode(app, *pid);  // 按引擎模块自动选 steam / v1.30
     bool restarted = false;
     uintptr_t ptr = 0;
     try {
@@ -554,10 +578,10 @@ void OnInit(App& app) {
                     app.proc_selected = static_cast<int>(i);
                     break;
                 }
+            AutoSelectMode(app, *new_pid);  // 重启后按新进程引擎模块重选版本
             ptr = app.modder.Initialize(*pid);
             restarted = true;
-        }
-        uintptr_t slot = app.modder.CurItemSlotAddr();
+        }        uintptr_t slot = app.modder.CurItemSlotAddr();
         std::snprintf(app.raw_addr, sizeof(app.raw_addr), "0x%s", Hex8(slot).c_str());
         const bool dbg = !app.hidden;
         std::string prefix = restarted ? "检测到游戏重启,已自动重新选择进程。" : "";
@@ -629,24 +653,63 @@ BasicState CollectBasicState(const App& app) {
     return st;
 }
 
+// 检测游戏窗口内左键按下(上升沿),触发"点击捕获":
+// 解锁->清槽->等游戏把被点中的物品读进槽->一到手立即冻结(防被后续悬停/场景顶掉)。
+// 只在已注入且支持冻结时生效;点击发生在我们窗口上不算。
+// 从物品基址读取基础字段+属性表格,更新快照与状态(「读取属性」的公共主体)。
+void ReadFromBase(App& app, uintptr_t ib) {
+    FillBasic(app, app.modder.ReadBasicFields(ib));
+    app.attrs = app.modder.ReadAttributes(ib);
+    app.attr_sel.assign(app.attrs.size(), false);
+    app.last_attrs = app.attrs;  // 快照:供"复制上一件物品"用
+    app.last_item_base = ib;
+    if (!app.hidden) {
+        app.SetStatus("读取完成。物品基址 = 0x" + Hex8(ib) + ",属性 " +
+                      std::to_string(app.attrs.size()) + " 条。");
+    } else {
+        app.SetStatus("读取完成,属性 " + std::to_string(app.attrs.size()) + " 条。");
+    }
+}
+
 void OnRead(App& app) {
     if (!app.modder.Mem().IsOpen()) {
         app.SetStatus("请先点击\"初始化\"。");
         return;
     }
     try {
-        uintptr_t ib = app.modder.GetItemBase();
-        FillBasic(app, app.modder.ReadBasicFields(ib));
-        app.attrs = app.modder.ReadAttributes(ib);
-        app.attr_sel.assign(app.attrs.size(), false);
-        app.last_attrs = app.attrs;  // 快照:供"复制上一件物品"用
-        app.last_item_base = ib;
-        if (!app.hidden) {
-            app.SetStatus("读取完成。物品基址 = 0x" + Hex8(ib) + ",属性 " +
-                          std::to_string(app.attrs.size()) + " 条。");
+        uintptr_t ib = 0;
+        if (app.modder.BagFlagActive()) {
+            // 背包拿起边缘门:闩锁 = 最近一次"从背包拿起(0->1)"的物品,读它即可。
+            // 悬停/场景读取在 flag 平直期不会入闩锁,无需再等捕获。
+            uintptr_t p = app.modder.GetItemPointer();
+            if (p < 0x10000) {
+                app.SetStatus(
+                    "请先在游戏里从背包拿起一件物品(点一下让图标贴到光标),再点\"读取属性\"。");
+                return;
+            }
+            ib = p + app.modder.Config().Current().item_base_adjust;
+        } else if (app.modder.CaptureFreezeSupported()) {
+            // 解冻让新捕获可通过;绝不清槽——不匹配门控的读取不改 cur_item,
+            // 失败也保持原地址(只会被 cave 的合法捕获改写)。
+            app.SetStatus("正在捕获手持物品…(请保持武器握在手上)");
+            app.modder.SetCaptureFrozen(false);
+            for (int i = 0; i < 60; ++i) {  // 最长 ~3 秒
+                uintptr_t p = app.modder.GetItemPointer();
+                if (p >= 0x10000) {
+                    ib = p + app.modder.Config().Current().item_base_adjust;
+                    break;
+                }
+                Sleep(50);
+            }
+            app.modder.SetCaptureFrozen(true);
+            if (!ib) {
+                app.SetStatus("未读到手持物品,请手持武器后重试(cur_item 保持原地址不变)。");
+                return;
+            }
         } else {
-            app.SetStatus("读取完成,属性 " + std::to_string(app.attrs.size()) + " 条。");
+            ib = app.modder.GetItemBase();
         }
+        ReadFromBase(app, ib);
     } catch (const std::exception& ex) {
         std::string msg = Sanitize(ex.what(), !app.hidden);
         MsgBox("读取失败", msg, MB_ICONERROR);
@@ -1344,10 +1407,32 @@ void RenderAttrTable(App& app, float height) {
     std::vector<std::string> name_items = ItemData::AttrDisplayList();
     std::vector<const char*> name_items_c;
     for (const auto& s : name_items) name_items_c.push_back(s.c_str());
-    std::vector<const char*> color_items_c;
-    for (const auto& kv : ItemData::ColorNames()) color_items_c.push_back(kv.second.c_str());
     std::vector<const char*> percent_items_c;
     for (const auto& kv : ItemData::PercentNames()) percent_items_c.push_back(kv.second.c_str());
+    // 属性颜色下拉:颜色字段 + node_flag@0x10(隐藏/激活) 合成 6 项。
+    // 颜色:0白 1蓝 2浅蓝 3金 4不显示;浅蓝按 active 拆「激活/未激活」两项。
+    static const char* kColorStateItems[] = {
+        "白色", "蓝色(K)", "浅蓝色激活(C)", "浅蓝色未激活(H)", "金色(Z)", "不显示",
+    };
+    auto color_to_idx = [](uint32_t c, uint32_t act) -> int {
+        switch (c) {
+            case 0: return 0;
+            case 1: return 1;
+            case 2: return act ? 2 : 3;
+            case 3: return 4;
+            default: return 5;  // 4 及未知 -> 不显示
+        }
+    };
+    auto color_from_idx = [](int idx, uint32_t& c, uint32_t& act) {
+        switch (idx) {
+            case 0: c = 0; act = 1; break;
+            case 1: c = 1; act = 1; break;
+            case 2: c = 2; act = 1; break;  // 浅蓝激活
+            case 3: c = 2; act = 0; break;  // 浅蓝未激活(隐藏)
+            case 4: c = 3; act = 1; break;
+            default: c = 4; act = 1; break;
+        }
+    };
 
     ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                             ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY |
@@ -1355,7 +1440,7 @@ void RenderAttrTable(App& app, float height) {
     if (ImGui::BeginTable("attrs", 5, flags, ImVec2(0.0f, height))) {
         ImGui::TableSetupColumn("选择", ImGuiTableColumnFlags_WidthFixed, 48.0f);
         ImGui::TableSetupColumn("属性名", ImGuiTableColumnFlags_WidthFixed, 220.0f);
-        ImGui::TableSetupColumn("属性颜色", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+        ImGui::TableSetupColumn("属性颜色", ImGuiTableColumnFlags_WidthFixed, 178.0f);
         ImGui::TableSetupColumn("类型", ImGuiTableColumnFlags_WidthFixed, 90.0f);
         ImGui::TableSetupColumn("属性值", ImGuiTableColumnFlags_WidthStretch, 0.0f);
         ImGui::TableHeadersRow();
@@ -1379,11 +1464,10 @@ void RenderAttrTable(App& app, float height) {
                 }
             }
             if (ImGui::TableSetColumnIndex(2)) {
-                int cur = IndexOf(app.color_ids, p.color);
+                int cur = color_to_idx(p.color, p.active);
                 ImGui::SetNextItemWidth(-FLT_MIN);
-                if (ImGui::Combo("##color", &cur, color_items_c.data(),
-                                 static_cast<int>(color_items_c.size()))) {
-                    if (cur >= 0) p.color = app.color_ids[static_cast<size_t>(cur)];
+                if (ImGui::Combo("##color", &cur, kColorStateItems, 6)) {
+                    color_from_idx(cur, p.color, p.active);
                 }
             }
             if (ImGui::TableSetColumnIndex(3)) {
@@ -3220,8 +3304,8 @@ void RenderH2Tab(App& app) {
 
 // ============================================================================
 // 版本号:日期部分从编译期 __DATE__("Mmm dd yyyy")生成 YYMMDD,每次编译自动取当天;
-// 后缀 "v2"(或 v1/v3...)为手动版本号,由用户指定后改这里。
-// 启动弹窗显示形如 "Ver: 260903v2"。
+// 后缀 "v1"(或 v2/v3...)为手动版本号,仅当用户说"用 v2/v3/v4"才改这里。
+// 启动弹窗显示形如 "Ver: 260913v1"。
 // ============================================================================
 constexpr int kVerMonth() {
     constexpr const char* names[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -3242,7 +3326,7 @@ constexpr int kVerDay() {
 }
 const char* kVersionText() {
     static char buf[32];
-    std::snprintf(buf, sizeof(buf), "Ver: %02d%02d%02dv2", kVerYear2(), kVerMonth(), kVerDay());
+    std::snprintf(buf, sizeof(buf), "Ver: %02d%02d%02dv1", kVerYear2(), kVerMonth(), kVerDay());
     return buf;
 }
 
@@ -3616,7 +3700,7 @@ const char* const kHelpCharSteps[] = {
 
 const char* const kHelpItemSteps[] = {
     "1. 初始化:点\"初始化\"打开游戏进程(自动完成物品捕获,无需额外操作)。",
-    "2. 钩住物品:在游戏里把要改的物品扔到地上再捡起来,钩子会在捡起瞬间捕获它。",
+    "2. 钩住物品:在游戏里把要改的物品从物品栏中捡起来(注意必须从物品栏捡起,地上捡起无效),钩子会锁定它。",
     "3. 读取属性:点\"读取属性\",表格显示当前所有词条(同时自动缓存一份,供\"复制上一件物品\"使用);读不到或读到旧物品时,重复第 2 步再点读取。",
     "4. 编辑词条:直接修改数值、颜色、类型,或用\"添加/删除/清空\"调整数量;也可\"从模板读取\"、\"另存为\"批量处理。",
     "5. 保存属性:点\"保存属性\"写回内存。现有词条写回原链表节点;新增的词条由编辑器自动从节点池(编辑器管理的一块固定内存)分配并接到链尾,无需手工干预。",
