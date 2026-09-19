@@ -99,6 +99,17 @@ std::vector<std::string> AttrDisplayList() {
     return list;
 }
 
+const std::vector<std::string>& AttrDisplayListRef() {
+    // UI 每帧都要这份表(道具修改/GAM 词条下拉): 静态缓存一份, 不再每帧新建 ~99 个 string
+    static const std::vector<std::string> k = AttrDisplayList();
+    return k;
+}
+
+const std::vector<std::string>& PercentDisplayListRef() {
+    static const std::vector<std::string> k = PercentDisplayList();
+    return k;
+}
+
 std::optional<uint32_t> ParseAttrDisplay(const std::string& text) {
     if (text.empty()) return std::nullopt;
     std::string t = text;

@@ -35,6 +35,10 @@ constexpr int kArrowType14 = 14;
 std::string AttrDisplay(uint32_t attr_id);
 /// 全部合法属性名选项(按 ID 升序),用于下拉框。
 std::vector<std::string> AttrDisplayList();
+/// 同 AttrDisplayList, 但静态缓存(UI 每帧调用用这个, 不每次新建 vector)。
+const std::vector<std::string>& AttrDisplayListRef();
+/// 同 PercentDisplayList 的静态缓存版本。
+const std::vector<std::string>& PercentDisplayListRef();
 /// "3C：闪避率" -> 0x3C。无法解析返回 nullopt。兼容半角/全角冒号、带或不带 0x 前缀。
 std::optional<uint32_t> ParseAttrDisplay(const std::string& text);
 /// 显示串是否是合法属性名选项(ID 必须在 ATTR_NAMES 中)。

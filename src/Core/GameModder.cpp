@@ -708,14 +708,17 @@ void GameModder::WriteField(uintptr_t item_base, const BasicFieldCfg& f, int v) 
 
 std::vector<uintptr_t> GameModder::ReadNodeAddrs(uintptr_t item_base) {
     const AttrListCfg& cfg = config_.Current().attr_list;
-    uintptr_t head = mem_.ReadUInt32(item_base + cfg.head_offset);
     std::vector<uintptr_t> addrs;
+    uint32_t head = 0;
+    if (!mem_.ReadBuf(item_base + cfg.head_offset, &head, 4)) return addrs;  // P2: 栈缓冲, 不分配
     uintptr_t addr = head;
     while (true) {
         if (addr == 0 || addr == 0xFFFFFFFF || addr < 0x10000) break;
         if (std::find(addrs.begin(), addrs.end(), addr) != addrs.end()) break;  // 环保护
         addrs.push_back(addr);
-        addr = mem_.ReadUInt32(addr + cfg.next_offset);
+        uint32_t next = 0;
+        if (!mem_.ReadBuf(addr + cfg.next_offset, &next, 4)) break;
+        addr = next;
     }
     return addrs;
 }
@@ -723,19 +726,32 @@ std::vector<uintptr_t> GameModder::ReadNodeAddrs(uintptr_t item_base) {
 std::vector<ItemProperty> GameModder::ReadAttributes(uintptr_t item_base) {
     const AttrListCfg& cfg = config_.Current().attr_list;
     std::vector<ItemProperty> result;
+    // P2: 节点字段全在同一槽内(id 0x0C..value 0x20), 整段一次读 ——
+    // 原来是每节点 5 次 ReadProcessMemory + 5 次 vector 分配(20 条词条 ≈ 120 次系统调用)。
+    uint32_t max_off = cfg.id_offset + 4;
+    for (uint32_t o : {cfg.color_offset + 4, cfg.node_flag_offset + 4, cfg.precent_offset + 4,
+                       cfg.value_offset + 4})
+        if (o > max_off) max_off = o;
+    const int need = (int)max_off;
+    std::vector<unsigned char> slot((size_t)need);   // 循环外分配一次, 逐节点复用
     for (uintptr_t addr : ReadNodeAddrs(item_base)) {
-        try {
-            uint32_t aid = mem_.ReadUInt32(addr + cfg.id_offset);
-            uint32_t color = mem_.ReadUInt32(addr + cfg.color_offset);
-            uint32_t flag = mem_.ReadUInt32(addr + cfg.node_flag_offset);
-            // precent 在 CT 中是 Float 类型,按 float 读再转 0/1
-            float prec_f = mem_.ReadFloat(addr + cfg.precent_offset);
-            uint32_t prec = prec_f != 0.0f ? 1 : 0;
-            float val = mem_.ReadFloat(addr + cfg.value_offset);
-            result.push_back(ItemProperty(addr, aid, color, flag ? 1u : 0u, prec, val));
-        } catch (...) {
-            continue;
-        }
+        if (!mem_.ReadBuf(addr, slot.data(), need)) continue;  // 坏地址跳过(同旧行为)
+        auto dw = [&](uint32_t off) -> uint32_t {
+            return (uint32_t)slot[off] | ((uint32_t)slot[off + 1] << 8) |
+                   ((uint32_t)slot[off + 2] << 16) | ((uint32_t)slot[off + 3] << 24);
+        };
+        auto fl = [&](uint32_t off) -> float {
+            uint32_t v = dw(off);
+            float f;
+            std::memcpy(&f, &v, 4);
+            return f;
+        };
+        uint32_t aid = dw(cfg.id_offset);
+        uint32_t color = dw(cfg.color_offset);
+        uint32_t flag = dw(cfg.node_flag_offset);
+        uint32_t prec = fl(cfg.precent_offset) != 0.0f ? 1 : 0;  // precent 是 float, 读后转 0/1
+        float val = fl(cfg.value_offset);
+        result.push_back(ItemProperty(addr, aid, color, flag ? 1u : 0u, prec, val));
     }
     return result;
 }

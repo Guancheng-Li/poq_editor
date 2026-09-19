@@ -136,6 +136,18 @@ static bool MakeItem(size_t pos, const std::vector<uint8_t>& buf, GamItem& it) {
         size_t nused = 0;
         if (GamFile::DecStr(it.content, noff, nm, nused)) it.name = nm;
     }
+    // 树过滤缓存: 拼好"中文名(别名)"并转小写, 过滤器每帧直接比对(P1)
+    {
+        auto low = [](const std::string& x) {
+            std::string r = x;
+            for (char& c : r)
+                if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            return r;
+        };
+        it.alias_low = low(it.alias);
+        if (it.name.empty() || it.alias == "?") it.disp_low = it.alias_low;
+        else it.disp_low = low(it.name + "(" + it.alias + ")");
+    }
     it.ParseAffixes();
     return true;
 }
@@ -225,6 +237,17 @@ static void WriteContentLen(std::vector<uint8_t>& c) {
 }
 
 std::string GamItem::GetGInfo() const {
+    // 命中缓存: 直接读该偏移处的值字段(P3)
+    if (ginfo_key_off_ != 0 && ginfo_key_off_ + 4 < content.size()) {
+        std::string s;
+        size_t used = 0;
+        if (GamFile::DecStr(content, ginfo_key_off_, s, used) && s == "G_Info") {
+            std::string val;
+            size_t used2 = 0;
+            if (GamFile::DecStr(content, ginfo_key_off_ + used, val, used2)) return val;
+        }
+        ginfo_key_off_ = 0;   // 缓存失效, 退回全扫
+    }
     // 找字段名串 "G_Info", 其后紧跟的字符串即词条文本
     for (size_t off = 0; off + 4 < content.size(); ++off) {
         std::string s;
@@ -233,7 +256,10 @@ std::string GamItem::GetGInfo() const {
             if (s == "G_Info" && off + used + 4 < content.size()) {
                 std::string val;
                 size_t used2 = 0;
-                if (GamFile::DecStr(content, off + used, val, used2)) return val;
+                if (GamFile::DecStr(content, off + used, val, used2)) {
+                    ginfo_key_off_ = off;   // 记住偏移, 后续调用 O(1)
+                    return val;
+                }
             }
         }
     }
@@ -268,11 +294,13 @@ bool GamItem::SetGInfo(const std::string& gbktext) {
                 nb.push_back((uint8_t)(0 ^ (uint8_t)((newlen - 0x56 - newlen) & 0xFF)));  // 结尾 \0
                 nb.insert(nb.end(), content.begin() + valoff + oldused, content.end());
                 content = std::move(nb);
+                InvalidateGInfoCache();
+                if (has_affixes) WriteContentLen(content);  // G_Info 在数组前面, 变长/变短都平移了尾帧
                 dirty = true;
                 // 词条数组是游戏真正读的结构: G_Info 改了必须同步重建它
                 // (no_sync: 补长度时只在文本尾部补空格, 词条行没变, 不必也不能重建 —— 否则
                 //  第二遍会拿到已重建的数组, 让"只存上限节点"这类消歧规则失效、凭空长出下限节点)
-                if (has_affixes && !no_sync) SyncAffixesFromGInfo();
+                if (has_affixes && !no_sync && !SyncAffixesFromGInfo()) return false;
                 return true;
             }
         }
@@ -301,6 +329,7 @@ bool GamItem::SetAlias(const std::string& newalias) {
     nb.push_back((uint8_t)(0 ^ (uint8_t)((newlen - 0x56 - newlen) & 0xFF)));  // 结尾 null
     nb.insert(nb.end(), content.begin() + (ptrdiff_t)aend, content.end());
     content = std::move(nb);
+    InvalidateGInfoCache();
     alias = newalias;
     aend = off + 4 + slenv;
     if (has_affixes) WriteContentLen(content); // 词条数组随之后移, 收尾长度字段要跟着改
@@ -331,6 +360,7 @@ bool GamItem::SetName(const std::string& gbkname) {
     nb.insert(nb.end(), content.begin() + (ptrdiff_t)(off + oldused), content.end());
     long long delta = (long long)(4 + newlen + 1) - (long long)oldused;
     content = std::move(nb);
+    InvalidateGInfoCache();
     name = gbkname;
     aend = (size_t)((long long)aend + delta);  // 名在别名之前, 长度变化会平移 aend
     if (has_affixes) WriteContentLen(content); // 词条数组随之后移, 收尾长度字段要跟着改
@@ -361,23 +391,47 @@ void GamItem::ParseAffixes() {
     if (c.size() < 64) return;
     // 末尾 4 字节 = 内容长度
     if (GamFile::DwAt(c, c.size() - 4) != (uint32_t)c.size()) return;
-    // 收集所有 [0x2C][0xFFFFFFFF] 节点标记
-    std::vector<size_t> marks;
-    for (size_t o = 0; o + 8 <= c.size(); ++o)
-        if (GamFile::DwAt(c, o) == 0x2Cu && GamFile::DwAt(c, o + 4) == 0xFFFFFFFFu)
-            marks.push_back(o);
-    if (marks.empty()) return;
-    // 取最长 44 步长链, 且其末节点负载恰好收在"内容长度"字段之前
+    // 词条数组在内容末尾: 先从尾部按 44 步长倒着验证(P4: O(节点数), 原来整段逐字节全扫);
+    // 倒着不成立时退回原来的前向全扫(兼容异常布局)。
     size_t base = 0, n = 0;
-    for (size_t i = 0; i < marks.size(); ++i) {
+    if (c.size() >= 48 && GamFile::DwAt(c, c.size() - 48) == 0x2Cu &&
+        GamFile::DwAt(c, c.size() - 48 + 4) == 0xFFFFFFFFu) {
+        size_t b = c.size() - 48;
         size_t k = 1;
-        while (i + k < marks.size() && marks[i + k] == marks[i] + 44 * k) ++k;
-        if (marks[i] + 44 * k == c.size() - 4 && k > n) {
-            base = marks[i];
+        while (b >= 44 && GamFile::DwAt(c, b - 44) == 0x2Cu &&
+               GamFile::DwAt(c, b - 44 + 4) == 0xFFFFFFFFu) {
+            b -= 44;
+            ++k;
+        }
+        if (b >= 4 && GamFile::DwAt(c, b - 4) == (uint32_t)k) {
+            base = b;
             n = k;
         }
     }
-    if (n == 0 || base < 4) return;
+    if (n == 0) {
+        // 回退: 收集所有 [0x2C][0xFFFFFFFF] 标记, 取最长 44 步长链且末节点收在长度字段之前
+        std::vector<size_t> marks;
+        for (size_t o = 0; o + 8 <= c.size(); ++o)
+            if (GamFile::DwAt(c, o) == 0x2Cu && GamFile::DwAt(c, o + 4) == 0xFFFFFFFFu)
+                marks.push_back(o);
+        for (size_t i = 0; i < marks.size(); ++i) {
+            size_t k = 1;
+            while (i + k < marks.size() && marks[i + k] == marks[i] + 44 * k) ++k;
+            if (marks[i] + 44 * k == c.size() - 4 && k > n) {
+                base = marks[i];
+                n = k;
+            }
+        }
+    }
+    if (n == 0 || base < 4) {
+        // 没找到节点链: 再看是不是"0 节点数组"(词条被全部删光, 只剩 [count=0][长度])。
+        // 必须放在这里(确认无链之后) —— 正常物品的末节点负载尾部本身也是 0, 提前判会全部误判。
+        if (c.size() >= 8 && GamFile::DwAt(c, c.size() - 8) == 0u) {
+            affix_tail = 8;
+            has_affixes = true;
+        }
+        return;
+    }
     // 首节点前一个 dword = 词条数, 与链长自洽才认
     if (GamFile::DwAt(c, base - 4) != (uint32_t)n) return;
     for (size_t k = 0; k < n; ++k) {
@@ -715,6 +769,7 @@ bool GamItem::SetAffixes(const std::vector<AffixNode>& list) {
     }
     putDw((uint32_t)out.size() + 4);   // 内容长度(含本 dword)
     content = std::move(out);
+    InvalidateGInfoCache();
     affixes = list;
     affix_tail = 4 + 44 * list.size() + 4;
     has_affixes = true;
@@ -841,7 +896,9 @@ bool GamItem::ParseGInfoRows(std::vector<GInfoRow>& rows) const {
         if (nl == std::string::npos) break;
         pos = nl + 1;
     }
-    return !rows.empty();
+    // 文本非空即成功: 0 行(词条删光)也是合法结果 —— 不能用 rows.empty() 当失败,
+    // 否则 SyncAffixesFromGInfo 会放弃重建, "删光词条"就写不进数组(P0)。
+    return !txt.empty();
 }
 
 bool GamItem::SetGInfoRowValue(size_t idx, long vmin, long vmax) {

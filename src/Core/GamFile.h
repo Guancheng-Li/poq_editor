@@ -24,6 +24,15 @@ struct GamItem {
     bool removed = false;        // 标记删除(保存时从容器剔除)
     size_t cnt_off = 0;          // 本物品所属组的 count 字段偏移(删除时递减该组计数)
 
+    // ---- 树过滤缓存(P1: 过滤器每帧比对, 不再每帧 ToLower/拼串) ----
+    // P3: G_Info 字段名串的偏移缓存(0=未缓存)。内容发生长度变化时由各写入口失效,
+    // 于是"解析词条->取文本->取头行"这种连续调用只全扫一次而不是三次。
+    mutable size_t ginfo_key_off_ = 0;
+    void InvalidateGInfoCache() { ginfo_key_off_ = 0; }
+
+    std::string alias_low;        // alias 的小写(装载时算一次)
+    std::string disp_low;         // 显示名"中文名(别名)"的小写(装载时算一次, 无中文名时= alias_low)
+
     int32_t GetField(const char* name, bool* ok) const;
     bool SetField(const char* name, int64_t v);  // 就地改(同长度)
     std::string GetGInfo() const;                // 词条 GBK 文本

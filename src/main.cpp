@@ -217,9 +217,13 @@ void Md5Update(Md5Ctx& ctx, const void* data, size_t n) {
 
 void Md5Final(Md5Ctx& ctx, unsigned char out[16]) {
     uint64_t bits = ctx.len * 8;
-    unsigned char one = 0x80, zero = 0, lb[8];
-    Md5Update(ctx, &one, 1);
-    while (ctx.n != 56) Md5Update(ctx, &zero, 1);
+    unsigned char lb[8];
+    // padding: 0x80 之后补零到 (56 mod 64) —— 一次喂完(原来逐字节调 Update 最多 63 次)
+    size_t pad_len = (ctx.n < 56) ? (56 - ctx.n) : (120 - ctx.n);
+    unsigned char pad[128];
+    pad[0] = 0x80;
+    if (pad_len > 1) std::memset(pad + 1, 0, pad_len - 1);
+    Md5Update(ctx, pad, pad_len);
     for (int i = 0; i < 8; ++i) lb[i] = (unsigned char)((bits >> (8 * i)) & 0xFF);
     Md5Update(ctx, lb, 8);
     uint32_t v[4] = {ctx.a, ctx.b, ctx.c, ctx.d};
@@ -626,6 +630,12 @@ struct App {
     std::string gam_last_dir;               // 上次打开 gam 的目录(记忆)
     poq::SceneCatalog gam_scene_cat;        // 场景全名目录(容器别名->完整场景路径)
     bool gam_scene_loaded = false;
+    // GAM 树分级缓存(P1): 结构变化时重建, 不再每帧构建
+    struct GamRoom { std::string label; int cont; std::string label_low; };
+    struct GamRegion { std::string disp; std::string disp_low;
+                       std::vector<GamRoom> rooms; std::vector<GamRoom> objs; };
+    std::vector<GamRegion> gam_regions;
+    int gam_regions_items = -1;
     poq::ItemNames gam_item_names;         // 物品中文名(别名->中文)
     bool gam_item_names_loaded = false;
     char gam_ginfo_buf[32768] = {0};         // 词条文本编辑缓冲(UTF-8)
@@ -876,6 +886,18 @@ void SnapshotNames(App& app) {
     }
 }
 
+// 字段值的可读显示: 枚举字段(如 类型/五行)显示成"值：名字", 与下拉框一致; 其它直接数字。
+std::string FieldValueDisplay(const App& app, const char* label, int v) {
+    for (const auto& f : app.cfg.Current().basic_fields) {
+        if (f.label != label) continue;
+        auto it = f.enum_map.find(v);
+        if (it != f.enum_map.end())
+            return f.enum_display_value ? (std::to_string(v) + "：" + it->second) : it->second;
+        break;
+    }
+    return std::to_string(v);
+}
+
 BasicState CollectBasicState(const App& app) {
     BasicState st;
     for (size_t i = 0; i < app.basic_fields.size(); ++i) {
@@ -1011,7 +1033,7 @@ void OnCopyPrevItem(App& app) {
     std::string q = "上一件物品:";
     if (!app.last_name.empty()) q += "\n  名字: " + app.last_name;
     if (!app.last_alias.empty()) q += "\n  别名: " + app.last_alias;
-    if (app.last_type >= 0) q += "\n  类型: " + std::to_string(app.last_type);
+    if (app.last_type >= 0) q += "\n  类型: " + FieldValueDisplay(app, "类型", app.last_type);
     q += "\n\n这三项(名字/别名/类型)要不要一起复制过来？词条一定复制。";
     App* ap = &app;
     MsgBoxAsk("复制上一件物品", q, [ap](int choice) {
@@ -1113,7 +1135,7 @@ void OnLoadTpl(App& app) {
         auto a1 = res.basic_strings.find("道具别名");
         if (a1 != res.basic_strings.end()) al = a1->second;
         auto t1 = res.basic_values.find("类型");
-        if (t1 != res.basic_values.end()) ty = std::to_string(t1->second);
+        if (t1 != res.basic_values.end()) ty = FieldValueDisplay(app, "类型", t1->second);
     }
     if (nm.empty() && al.empty() && ty.empty()) {
         ApplyLoadedTpl(app, res, true);   // 没有这三项, 直接全量导入
@@ -1751,9 +1773,10 @@ void RenderAttrTable(App& app, float height) {
 
     ImGui::Separator();
 
-    std::vector<std::string> name_items = ItemData::AttrDisplayList();
-    std::vector<const char*> name_items_c;
-    for (const auto& s : name_items) name_items_c.push_back(s.c_str());
+    static const std::vector<std::string>& name_items = ItemData::AttrDisplayListRef();
+    static std::vector<const char*> name_items_c;
+    if (name_items_c.empty())
+        for (const auto& s : name_items) name_items_c.push_back(s.c_str());
     std::vector<const char*> percent_items_c;
     for (const auto& kv : ItemData::PercentNames()) percent_items_c.push_back(kv.second.c_str());
     // 属性颜色下拉:颜色字段 + node_flag@0x10(隐藏/激活) 合成 6 项。
@@ -3028,9 +3051,8 @@ static void GamOnPasteAttr(App& app) {
     if (!app.gam_clip_alias.empty()) q += "\n  别名: " + app.gam_clip_alias;
     {
         auto ft = app.gam_clip_fields.find("type");
-        char tb[32];
-        std::snprintf(tb, sizeof(tb), "%d", ft != app.gam_clip_fields.end() ? (int)ft->second : -1);
-        q += std::string("\n  类型: ") + tb;
+        int tv = ft != app.gam_clip_fields.end() ? (int)ft->second : -1;
+        q += "\n  类型: " + FieldValueDisplay(app, "类型", tv);   // 枚举显示"值：名字"
     }
     q += "\n\n这三项(名字/别名/类型)要不要一起粘贴？其余属性按所选方式粘贴。";
     App* ap = &app;
@@ -3108,12 +3130,6 @@ static void RenderGamTree(App& app) {
     ImGui::BeginChild("gamtree2");
     std::string lowf = ToLower(filt);
 
-    // 构建分级结构: 地图(区域) -> 房间/物体 -> 容器
-    struct Room { std::string label; int cont; };
-    struct Region { std::string disp; std::vector<Room> rooms; std::vector<Room> objs; };
-    std::vector<Region> regions;
-    std::map<std::string, int> ridx;
-    std::string cur_region;
     auto seg = [](const std::string& path, int a, int b) {  // "/" 分割取 [a,b)
         std::vector<std::string> segs;
         size_t i = 0;
@@ -3130,39 +3146,51 @@ static void RenderGamTree(App& app) {
         }
         return out;
     };
-    for (int ci = 0; ci < (int)app.gam_file.containers.size(); ++ci) {
-        const auto& c = app.gam_file.containers[(size_t)ci];
-        if (c.item_idx.empty()) continue;
-        std::string path = app.gam_scene_loaded ? app.gam_scene_cat.MatchPath(c.alias) : "";
-        std::string region_disp, room_label;
-        bool is_scene = false;
-        if (!path.empty()) {
-            region_disp = seg(path, 0, 2);      // 秦殇/邯郸
-            room_label = seg(path, 3, 4);       // 武器铺
-            if (room_label.empty()) room_label = c.alias;
-            cur_region = region_disp;
-            is_scene = true;
-        } else {
-            room_label = c.alias;               // 物体(未匹配场景)
-            region_disp = cur_region.empty() ? "未分类" : cur_region;
+    // 构建分级结构(P1: 缓存进 App, 物品数变化才重建 —— 世界档 558 容器每帧构建太浪费)
+    auto& regions = app.gam_regions;
+    if ((int)app.gam_file.items.size() != app.gam_regions_items) {
+        app.gam_regions.clear();
+        app.gam_regions_items = (int)app.gam_file.items.size();
+        std::map<std::string, int> ridx;
+        std::string cur_region;
+        for (int ci = 0; ci < (int)app.gam_file.containers.size(); ++ci) {
+            const auto& c = app.gam_file.containers[(size_t)ci];
+            if (c.item_idx.empty()) continue;
+            std::string path = app.gam_scene_loaded ? app.gam_scene_cat.MatchPath(c.alias) : "";
+            std::string region_disp, room_label;
+            bool is_scene = false;
+            if (!path.empty()) {
+                region_disp = seg(path, 0, 2);      // 秦殇/邯郸
+                room_label = seg(path, 3, 4);       // 武器铺
+                if (room_label.empty()) room_label = c.alias;
+                cur_region = region_disp;
+                is_scene = true;
+            } else {
+                room_label = c.alias;               // 物体(未匹配场景)
+                region_disp = cur_region.empty() ? "未分类" : cur_region;
+            }
+            if (ridx.find(region_disp) == ridx.end()) {
+                ridx[region_disp] = (int)app.gam_regions.size();
+                app.gam_regions.push_back(
+                    App::GamRegion{region_disp, ToLower(region_disp), {}, {}});
+            }
+            App::GamRoom r{room_label, ci, ToLower(room_label)};
+            if (is_scene)
+                app.gam_regions[(size_t)ridx[region_disp]].rooms.push_back(std::move(r));
+            else
+                app.gam_regions[(size_t)ridx[region_disp]].objs.push_back(std::move(r));
         }
-        if (ridx.find(region_disp) == ridx.end()) {
-            ridx[region_disp] = (int)regions.size();
-            regions.push_back(Region{region_disp, {}, {}});
-        }
-        Room r{room_label, ci};
-        if (is_scene) regions[(size_t)ridx[region_disp]].rooms.push_back(std::move(r));
-        else regions[(size_t)ridx[region_disp]].objs.push_back(std::move(r));
     }
 
     // 渲染
     auto item_matches = [&](int idx) {
         if (idx < 0 || idx >= (int)app.gam_file.items.size()) return false;
-        if (app.gam_file.items[(size_t)idx].removed) return false;
-        if (lowf.empty()) return true;
         const auto& it = app.gam_file.items[(size_t)idx];
-        return ToLower(it.alias).find(lowf) != std::string::npos ||
-               ToLower(GamItemDispName(app, it.alias)).find(lowf) != std::string::npos;
+        if (it.removed) return false;
+        if (lowf.empty()) return true;
+        // P1: 装载时已把 alias/显示名转好小写缓存, 每帧零分配
+        return it.alias_low.find(lowf) != std::string::npos ||
+               it.disp_low.find(lowf) != std::string::npos;
     };
     auto cont_live_count = [&](int ci) {
         int n = 0;
@@ -3210,7 +3238,7 @@ static void RenderGamTree(App& app) {
             ImGui::PopID();
         }
     };
-    auto render_group = [&](const Room& room, const char* idpfx) {
+    auto render_group = [&](const App::GamRoom& room, const char* idpfx) {
         const auto& c = app.gam_file.containers[(size_t)room.cont];
         bool cont_sel = (app.gam_sel_container == room.cont && app.gam_sel_item < 0);
         char lab[320];
@@ -3243,11 +3271,11 @@ static void RenderGamTree(App& app) {
         }
     };
     for (int ri = 0; ri < (int)regions.size(); ++ri) {
-        const Region& R = regions[(size_t)ri];
+        const App::GamRegion& R = regions[(size_t)ri];
         // 过滤: 区域名 / 任一房间名 / 任一物品名 命中才显示
-        bool any = lowf.empty() || ToLower(R.disp).find(lowf) != std::string::npos;
+        bool any = lowf.empty() || R.disp_low.find(lowf) != std::string::npos;
         if (!any) {
-            for (const Room& rm : R.rooms) {
+            for (const auto& rm : R.rooms) {
                 if (ToLower(rm.label).find(lowf) != std::string::npos) { any = true; break; }
                 for (int idx : app.gam_file.containers[(size_t)rm.cont].item_idx)
                     if (item_matches(idx)) { any = true; break; }
@@ -3255,7 +3283,7 @@ static void RenderGamTree(App& app) {
             }
         }
         if (!any) {
-            for (const Room& ob : R.objs) {
+            for (const auto& ob : R.objs) {
                 if (ToLower(ob.label).find(lowf) != std::string::npos) { any = true; break; }
                 for (int idx : app.gam_file.containers[(size_t)ob.cont].item_idx)
                     if (item_matches(idx)) { any = true; break; }
@@ -3268,8 +3296,8 @@ static void RenderGamTree(App& app) {
                                ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_DefaultOpen)) {
             continue;
         }
-        for (const Room& room : R.rooms) render_group(room, "room");
-        for (const Room& obj : R.objs) render_group(obj, "obj");
+        for (const auto& room : R.rooms) render_group(room, "room");
+        for (const auto& obj : R.objs) render_group(obj, "obj");
         ImGui::TreePop();
     }
     ImGui::EndChild();
@@ -3431,9 +3459,10 @@ static void RenderGamEdit(App& app) {
             //   召唤伙伴个数/驯兽最大数量 映射不到属性 id, 写盘时会被从词条数组里丢掉(选中也没用)。
             // 存档里遇到的这类名字, 下拉框会用"原名置顶"的方式显示出来, 读取不受影响。
         }
-        auto pct_list = ItemData::PercentDisplayList();   // 数值 / 百分比
-        std::vector<const char*> pct_c;
-        for (auto& t : pct_list) pct_c.push_back(t.c_str());
+        static const std::vector<std::string>& pct_list = ItemData::PercentDisplayListRef();
+        static std::vector<const char*> pct_c;
+        if (pct_c.empty())
+            for (auto& t : pct_list) pct_c.push_back(t.c_str());
         for (int i = 0; i < (int)app.gam_grows.size(); ++i) {
             auto& r = app.gam_grows[(size_t)i];
             ImGui::PushID(i);
@@ -3937,7 +3966,7 @@ void RenderH2Tab(App& app) {
 
 // ============================================================================
 // 版本号:日期部分从编译期 __DATE__("Mmm dd yyyy")生成 YYMMDD,每次编译自动取当天;
-// 后缀 "v1"(或 v2/v3...)为手动版本号,仅当用户说"用 v2/v3/v4"才改这里。
+// 后缀 "v2"(或 v3/v4...)为手动版本号,仅当用户说"用 v3/v4"才改这里。
 // 启动弹窗显示形如 "Ver: 260913v1"。
 // ============================================================================
 constexpr int kVerMonth() {
@@ -3959,7 +3988,7 @@ constexpr int kVerDay() {
 }
 const char* kVersionText() {
     static char buf[32];
-    std::snprintf(buf, sizeof(buf), "Ver: %02d%02d%02dv1", kVerYear2(), kVerMonth(), kVerDay());
+    std::snprintf(buf, sizeof(buf), "Ver: %02d%02d%02dv2", kVerYear2(), kVerMonth(), kVerDay());
     return buf;
 }
 

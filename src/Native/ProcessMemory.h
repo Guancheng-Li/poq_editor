@@ -78,6 +78,10 @@ public:
     /// Read `n_size` bytes from `base_address`. Throws std::runtime_error on failure.
     std::vector<unsigned char> Read(uintptr_t base_address, int n_size);
 
+    /// P2: 读进调用方缓冲, 不分配 —— 高频字段读取(如词条节点)用它。
+    /// 成功返回 true; 失败返回 false(不抛异常, 便于批量读取里跳过坏地址)。
+    bool ReadBuf(uintptr_t base_address, void* out, int n_size) noexcept;
+
     /// Read a 4-byte little-endian DWORD.
     unsigned int ReadUInt32(uintptr_t base_address);
 

@@ -246,6 +246,14 @@ std::vector<unsigned char> ProcessMemory::Read(uintptr_t base_address, int n_siz
     return buf;
 }
 
+bool ProcessMemory::ReadBuf(uintptr_t base_address, void* out, int n_size) noexcept {
+    if (handle_ == nullptr || n_size <= 0) return false;
+    SIZE_T bytes_read = 0;
+    return ::ReadProcessMemory(handle_, reinterpret_cast<LPCVOID>(base_address), out,
+                               static_cast<SIZE_T>(n_size), &bytes_read) != 0 &&
+           bytes_read == static_cast<SIZE_T>(n_size);
+}
+
 unsigned int ProcessMemory::ReadUInt32(uintptr_t base_address) {
     auto data = Read(base_address, 4);
     return static_cast<unsigned int>(data[0]) |
