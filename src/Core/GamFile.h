@@ -17,13 +17,21 @@ struct GamItem {
     size_t aend = 0;             // 别名尾偏移
     size_t rec_end = 0;          // 记录尾(=pos+4+len+8)
     std::string alias;           // 拼音别名
+    std::string name;            // 中文名(内容里路径字段之后的字符串, GBK)
+    size_t name_off = 0;         // 中文名字段在内容里的偏移(= 0x04 + 路径字段占用 + 4)
     bool dirty = false;          // 已编辑(保存时重写)
     bool is_new = false;         // 新增记录(保存时插入目标容器)
+    bool removed = false;        // 标记删除(保存时从容器剔除)
+    size_t cnt_off = 0;          // 本物品所属组的 count 字段偏移(删除时递减该组计数)
 
     int32_t GetField(const char* name, bool* ok) const;
     bool SetField(const char* name, int64_t v);  // 就地改(同长度)
     std::string GetGInfo() const;                // 词条 GBK 文本
     bool SetGInfo(const std::string& gbktext);   // 原位改词条文本(仅当编码长度≤当前占用)
+    /// 改物品别名字段(拼音,标准字符串编码); 变长由保存重排落盘。
+    bool SetAlias(const std::string& newalias);
+    /// 改物品中文名(内容偏移 0xD 的标准字符串字段, GBK); 变长由保存重排落盘。
+    bool SetName(const std::string& gbkname);
     /// 解析 G_Info 词条为结构化行(颜色组/属性名GBK/值/上限/百分比).
     struct GInfoRow {
         char color = 0;        // 'K'蓝 'C'亮蓝(激活隐藏) 'Z'金 'H'暗蓝(未激活隐藏), 0=白
@@ -47,6 +55,34 @@ struct GamItem {
     static bool ParseRecord(const std::vector<uint8_t>& rec, GamItem& out);
     /// 由内容重编出整条记录字节 [len][content][0][len+12]。
     static bool BuildRecord(const GamItem& it, std::vector<uint8_t>& out);
+
+    // ---- 词条数组(记录末尾, 与运行时内存 attr 节点同构; 游戏真正读的是它) ----
+    // 布局: [dword count][N × (dword 0x2C, dword 0xFFFFFFFF, 36B 负载)][dword 内容长度]
+    // 负载: +0x00 id, +0x04 激活(1/0), +0x08 颜色(0白1蓝2浅蓝3金),
+    //       +0x10 系数A, +0x14 值(float), +0x1C 系数C
+    struct AffixNode {
+        int32_t id = 0;
+        uint32_t active = 1;
+        uint32_t color = 0;
+        float a = 0;
+        float value = 0;
+        float c = 0;
+    };
+    std::vector<AffixNode> affixes;
+    size_t affix_tail = 0;      // 词条区总字节 = 4 + 44*N + 4; 区首 = content.size()-affix_tail
+    bool has_affixes = false;   // 数组不是必备结构; 无则不可新增词条
+    bool no_sync = false;       // true 时 SetGInfo 不重建词条数组(补长度这类"只动文本末尾"的操作用)
+
+    /// 解析记录末尾的词条数组。
+    void ParseAffixes();
+    /// 按当前 G_Info 文本重建词条数组(值/颜色/激活/上下限), 并修正末尾内容长度字段。
+    bool SyncAffixesFromGInfo();
+    /// 直接写入词条数组(不经 G_Info), 并修正末尾内容长度字段。
+    bool SetAffixes(const std::vector<AffixNode>& list);
+    /// 若内容比原来短, 在 G_Info 文本尾部补空格把长度补回来。
+    /// 原因(实测定性): 游戏有按"固定内容偏移"读的字段, 内容一旦变短, 其后的数据整体左移,
+    /// 那些字段就读到词条数组的字节 -> 物品被摆到非法位置(地上看不见)。
+    bool PadContentTo(size_t want_len);
 };
 
 /// 容器(场景/物体组): [len][string含场景名][count][子树...]
@@ -55,9 +91,10 @@ struct GamContainer {
     size_t end = 0;              // 下一容器起点(自身体 != end)
     std::string alias;
     std::vector<int> item_idx;   // 归属本容器的物品下标(在 file.items 中)
-    // 插入锚点: 直接拥有最后一件物品的组的 count 字段偏移 + 插入位置(该物品记录尾)
+    // 插入锚点: 物品最多的组的 count 字段偏移 + 该组最后一件物品的记录尾(解析后按组统计定)
     size_t insert_cnt_off = 0;
     size_t insert_pos = 0;
+    std::map<size_t, std::pair<int, size_t>> gstat;  // 组count偏移 -> (物品数, 该组末物品尾)
     bool first = false;          // 是否当前(首个/数据区开头)容器
     bool last = false;           // 是否末尾容器
 };

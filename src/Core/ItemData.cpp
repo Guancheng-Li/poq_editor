@@ -1,5 +1,7 @@
 #include "Core/ItemData.h"
 
+#include <windows.h>
+
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -188,6 +190,70 @@ std::optional<int> ParsePercentDisplay(const std::string& text) {
     }
     return std::nullopt;
 }
+
+// ------------------------------------------------------------------
+// 属性名 <-> GAM G_Info 词条名
+// ------------------------------------------------------------------
+
+std::string AttrGInfoName(const std::string& n) {
+    if (n.rfind("最大", 0) == 0) return "最大" + AttrGInfoName(n.substr(6));  // "最大" UTF-8=6B
+    if (n == "普通攻击") return "普通攻击力";
+    if (n == "普通防御") return "普通防御力";
+    if (n == "吸命") return "吸取生命率";
+    if (n == "吸魔") return "吸取魔法率";
+    if (n == "异态时间减少") return "异常状态时间减少";
+    if (n == "恢复箭支数量") return "自动恢复箭支数量";
+    if (n == "燃烧攻击几率") return "失明攻击几率";
+    if (n == "燃烧时间") return "失明时间";
+    if (n == "燃烧抗性") return "失明抗性";
+    static const char* elems[] = {"金", "木", "水", "火", "土"};
+    for (const char* e : elems) {
+        std::string s = e;
+        if (n == s + "属性攻击") return s + "系攻击力";
+        if (n == s + "属性防御") return s + "系防御力";
+    }
+    return n;
+}
+
+namespace {
+std::string U8ToGbk(const std::string& u8) {
+    if (u8.empty()) return "";
+    int n = ::MultiByteToWideChar(CP_UTF8, 0, u8.data(), (int)u8.size(), nullptr, 0);
+    if (n <= 0) return u8;
+    std::wstring w((size_t)n, L'\0');
+    ::MultiByteToWideChar(CP_UTF8, 0, u8.data(), (int)u8.size(), &w[0], n);
+    int m = ::WideCharToMultiByte(936, 0, w.data(), n, nullptr, 0, nullptr, nullptr);
+    std::string s((size_t)m, '\0');
+    ::WideCharToMultiByte(936, 0, w.data(), n, &s[0], m, nullptr, nullptr);
+    return s;
+}
+}  // namespace
+
+int AttrIdFromGInfoName(const std::string& gbk) {
+    static const std::map<std::string, int> kMap = [] {
+        std::map<std::string, int> m;
+        for (const auto& kv : AttrNames()) m[U8ToGbk(AttrGInfoName(kv.second))] = (int)kv.first;
+        return m;
+    }();
+    auto it = kMap.find(gbk);
+    return it == kMap.end() ? -1 : it->second;
+}
+
+// ------------------------------------------------------------------
+// 上下限成对属性(min id -> max id)
+// ------------------------------------------------------------------
+
+const std::map<int, int>& AffixPairs() {
+    // 游戏实测(写档回读): 0x01/0x02 渲染成 "五行攻击力 +下 ~ +上"、0x0C/0x0D 渲染成
+    // "有效距离 +下 ~ +上"; 0x29..0x34 同理。最大生命/最大精气/最大负重**不是**成对项。
+    static const std::map<int, int> kMap = {
+        {0x01, 0x02}, {0x0C, 0x0D}, {0x29, 0x2A}, {0x2B, 0x2C},
+        {0x2D, 0x2E}, {0x2F, 0x30}, {0x31, 0x32}, {0x33, 0x34},
+    };
+    return kMap;
+}
+
+bool IsAffixPairMinId(int id) { return AffixPairs().count(id) > 0; }
 
 }  // namespace ItemData
 }  // namespace poq

@@ -40,6 +40,22 @@ std::optional<uint32_t> ParseAttrDisplay(const std::string& text);
 /// 显示串是否是合法属性名选项(ID 必须在 ATTR_NAMES 中)。
 bool IsValidAttrDisplay(const std::string& text);
 
+// ---- 属性名 <-> GAM G_Info 词条名 ----
+/// 下拉框属性名(UTF-8) -> GAM G_Info 里的写法(UTF-8)。无差异时原样返回。
+/// 例: 普通攻击 -> 普通攻击力, 燃烧时间 -> 失明时间, 恢复箭支数量 -> 自动恢复箭支数量。
+std::string AttrGInfoName(const std::string& attrNameUtf8);
+/// GAM G_Info 词条名(GBK 字节) -> 属性 ID；无法识别返回 -1。
+int AttrIdFromGInfoName(const std::string& ginfoNameGbk);
+
+// ---- 上下限成对属性 ----
+/// 只有这些属性是"下限/上限"成对的(min id -> max id):
+/// 五行攻击力 0x01/0x02, 有效距离 0x0C/0x0D, 普通攻击力 0x29/0x2A,
+/// 金/木/水/火/土系攻击力 0x2B..0x34。
+/// 其余"最大X"(最大生命 0x17、最大精气 0x18、最大负重 0x1A…)都是**独立词条**,不合并。
+const std::map<int, int>& AffixPairs();
+/// id 是否是某个成对属性的下限 id。
+bool IsAffixPairMinId(int id);
+
 // ---- 颜色 <-> 显示串 ----
 std::string ColorDisplay(int color);
 std::vector<std::string> ColorDisplayList();

@@ -22,6 +22,8 @@ struct BasicState {
 struct TemplateLoadResult {
     /// 基础属性:{label: int}(已 clamp,不含只读字段)。
     std::map<std::string, int> basic_values;
+    /// 字符串基础字段:{规范标签: 值}(如 道具名字/道具别名)。UTF-8,与导出同编码。
+    std::map<std::string, std::string> basic_strings;
     /// 合法的属性列表。
     std::vector<ItemProperty> attrs;
     /// 被跳过属性的错误描述(非空时 UI 弹窗)。

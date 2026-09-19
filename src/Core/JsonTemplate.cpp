@@ -1,5 +1,7 @@
 #include "Core/JsonTemplate.h"
 
+#include <cstring>
+
 #include <cerrno>
 #include <cstdlib>
 #include <fstream>
@@ -143,7 +145,13 @@ TemplateLoadResult JsonTemplate::Load(const std::string& path,
     if (!root.IsObject()) throw std::runtime_error("JSON 顶层必须是对象");
 
     std::map<std::string, const BasicFieldCfg*> field_map;
-    for (const auto& f : basic_fields) field_map[f.label] = &f;
+    for (const auto& f : basic_fields) {
+        field_map[f.label] = &f;
+        // 旧版 JSON 里这两个字段叫"武器名字/武器别名"(后改名"道具名字/道具别名"):
+        // 旧键也指向同一字段, 老模板仍能导入; 导出统一用新名。
+        if (f.label == "道具名字") field_map["武器名字"] = &f;
+        if (f.label == "道具别名") field_map["武器别名"] = &f;
+    }
 
     TemplateLoadResult result;
 
@@ -153,9 +161,16 @@ TemplateLoadResult JsonTemplate::Load(const std::string& path,
         std::string label = kv.first;
         auto fit = field_map.find(label);
         if (fit == field_map.end() || fit->second->readonly) continue;  // 未知字段/只读:跳过
+        if (fit->second->type == "string_ptr") {   // 字符串字段(道具名字/道具别名)
+            if (kv.second.IsString() && !kv.second.string.empty())
+                result.basic_strings[fit->second->label] = kv.second.string;
+            continue;
+        }
         auto iv = ToInt(kv.second, *fit->second);
         if (!iv) continue;
-        result.basic_values[label] = Clamp(*fit->second, *iv);
+        // 按"字段的规范标签"存(旧键 武器名字/武器别名 命中的也是同一字段),
+        // 调用方只认规范标签。
+        result.basic_values[fit->second->label] = Clamp(*fit->second, *iv);
     }
 
     // ---- 属性列表 ----

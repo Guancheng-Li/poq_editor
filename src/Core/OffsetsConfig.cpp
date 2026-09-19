@@ -171,12 +171,12 @@ ModeCfg OffsetsConfig::DefaultMode() {
 
     BasicFieldCfg bf;
 
-    bf = F("武器名字", 0x28, "string_ptr");
+    bf = F("道具名字", 0x28, "string_ptr");
     bf.codepage = 936;
     m.basic_fields.push_back(bf);
 
-    bf = F("武器别名", 0x2C, "string_ptr");
-    bf.readonly = false;  // 可编辑(与武器名字同样式:原地写 GBK 字符串)
+    bf = F("道具别名", 0x2C, "string_ptr");
+    bf.readonly = false;  // 可编辑(与道具名字同样式:原地写 GBK 字符串)
     bf.codepage = 0;
     m.basic_fields.push_back(bf);
 
