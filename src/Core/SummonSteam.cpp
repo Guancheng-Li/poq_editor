@@ -4,7 +4,11 @@
 // summon 命令)。与 v1.30 版(Summon130.cpp)完全隔离,不共享任何召唤逻辑。
 //
 // 机制(对齐 python):
-// - 补丁点 = 模块基址 + 固定偏移;名字槽/类型表/刺客记录为 CE 实测绝对地址。
+// - 补丁点与数据(名字槽/类型表/刺客记录/控制标志)全部 = EasyRPG.dll 模块基址 +
+//   固定偏移。旧代码里的 0x53xxxxxx "绝对地址"是当年一次 ASLR 运行 EasyRPG 恰好
+//   落在 0x53740000 的快照;游戏开 DYNAMICBASE 后每次启动都变 → 写进无关内存崩
+//   游戏(召唤崩溃根因)。2026-10-16 实测(data/py/find_summon_addr.py):基址
+//   0x78820000 时下列偏移全部命中(表 cnt=521、rec469='克隆刺客弓'、哨兵/槽内联串一致)。
 // - 召唤按"显示名"查野兽表:野兽/刺客/随机秦兵走匹配器 field[0] 长名;
 //   秦兵 1-6 大类走 field[0] 单命中必中(长名<=10B 直接放槽10,>10B 重定向
 //   field[0] 到 scratch 唯一标签 Q###)。
@@ -36,17 +40,34 @@ namespace {
 // ---------------------------------------------------------------------------
 constexpr uintptr_t kOffFriendPush = 0x35BAA;   // 召唤强制 Friend imm(push 1 的 01)
 constexpr uintptr_t kOffBound = 0x3586D;        // 召唤类型上限 cmp eax,imm
-constexpr uintptr_t kOffControlCmp = 0x35C32;   // 可控性 cmp [0x53bb88cc],imm / 跳过注册
+constexpr uintptr_t kOffControlCmp = 0x35C32;   // 可控性 cmp [flag],imm / 跳过注册
 constexpr uintptr_t kOffType = 0x3585F;         // 强制召唤类型 mov eax,slot+1
 constexpr uintptr_t kOffMatcherImm = 0x6FAC6;   // 名字匹配器 push 0/1
-constexpr uintptr_t kNameZhuYan = 0x539771B0;   // 名字槽 slot9(朱厌源)
-constexpr uintptr_t kNameShanYi = 0x539771BC;   // 名字槽 slot10(善翼源)
-constexpr uintptr_t kRecBow = 0x53C1F5C0;       // 刺客弓记录
-constexpr uintptr_t kRecKnife = 0x53C1F700;     // 刺客刀记录
-constexpr uintptr_t kQinTable = 0x53bfab78;     // 秦兵类型表
+// 数据偏移(EasyRPG.dll 镜像内, 2026-10-16 ASLR 实测; 括号为旧绝对地址快照)
+constexpr uintptr_t kOffNamePaoXiao = 0x2371A4;  // 名字槽 slot8(狍鸮)   [旧 0x539771A4]
+constexpr uintptr_t kOffNameZhuYan = 0x2371B0;   // 名字槽 slot9(朱厌源) [旧 0x539771B0]
+constexpr uintptr_t kOffNameShanYi = 0x2371BC;   // 名字槽 slot10(善翼源)[旧 0x539771BC]
+constexpr uintptr_t kOffRecBow = 0x4DF5C0;       // 刺客弓记录  [旧 0x53C1F5C0]
+constexpr uintptr_t kOffRecKnife = 0x4DF700;     // 刺客刀记录  [旧 0x53C1F700]
+constexpr uintptr_t kOffQinTable = 0x4BAB78;     // 秦兵类型表  [旧 0x53bfab78]
+constexpr uintptr_t kOffQinNullPtr = 0x4BA410;   // 空指针哨兵  [旧 0x53bfa410]
+constexpr uintptr_t kOffFlag = 0x4788CC;         // 控制标志    [旧 0x53bb88cc]
+                                                 // (实测校验: 现场指令立即数, 见 g_flag)
 constexpr uint32_t kQinStride = 0x140;
-constexpr uint32_t kQinNullPtr = 0x53bfa410;    // 表记录的空指针哨兵
+constexpr uint32_t kRecBowIdx = 469;  // (kOffRecBow-8-kOffQinTable)/kQinStride, 刀=+1
 constexpr int kMaxRec = 600;
+
+// 模块基址(CmdSummon 入口设置; 同 Summon130.cpp 的 g_mb 模式): RT(偏移)=运行时地址
+uintptr_t g_mb = 0;
+inline uintptr_t RT(uintptr_t off) { return g_mb + off; }
+
+// 控制标志运行时地址。入口处从游戏现场指令(cmp [flag],imm @MB+0x35C32,未打补丁时
+// 的立即数即游戏重定位后的真实地址)实测纠偏 —— 手算偏移差一位就是写错内存崩游戏,
+// 不信常数信现场。
+uint32_t g_flag = 0;
+inline uint32_t FlagAddr() {
+    return g_flag ? g_flag : static_cast<uint32_t>(RT(kOffFlag));
+}
 
 // mon_type 映射ID -> 程序槽位(映射ID 3=白狼 跳过鸟=槽3,即 [0,1,2,4,5,6,7,8,9,10])
 const int kMonSlots[10] = {0, 1, 2, 4, 5, 6, 7, 8, 9, 10};
@@ -223,11 +244,20 @@ void PatchBound(ProcessMemory& mem, uintptr_t mb, int val, std::string& log) {
     PatchBytes(mem, mb + kOffBound, data, "type bound=0x" + Hex8(val), mb, log);
 }
 
+// 7 字节 cmp dword [flag], imm8 —— flag 是运行时地址(PE 重定位已把模块内引用
+// 改成基址+0x4888CC), 补丁里的立即数必须跟着变, 不能再写死旧值 0x53bb88cc。
+std::vector<unsigned char> MakeControlCmp(unsigned char imm) {
+    uint32_t f = FlagAddr();
+    return {0x83, 0x3d, static_cast<unsigned char>(f & 0xFF),
+            static_cast<unsigned char>((f >> 8) & 0xFF),
+            static_cast<unsigned char>((f >> 16) & 0xFF),
+            static_cast<unsigned char>((f >> 24) & 0xFF), imm};
+}
+
 void PatchControl(ProcessMemory& mem, uintptr_t mb, int val, std::string& log) {
-    // cmp dword [0x53bb88cc], imm
-    std::vector<unsigned char> data = {0x83, 0x3d, 0xcc, 0x88, 0xbb, 0x53,
-                                       static_cast<unsigned char>(val & 0xFF)};
-    PatchBytes(mem, mb + kOffControlCmp, data, "可控性 cmp 0x" + Hex8(val), mb, log);
+    // cmp dword [flag], imm
+    PatchBytes(mem, mb + kOffControlCmp, MakeControlCmp(static_cast<unsigned char>(val & 0xFF)),
+               "可控性 cmp 0x" + Hex8(val), mb, log);
 }
 
 void PatchFriend(ProcessMemory& mem, uintptr_t mb, int val, std::string& log) {
@@ -253,9 +283,8 @@ void PatchSkipMember(ProcessMemory& mem, uintptr_t mb, bool on, std::string& log
         PatchBytes(mem, mb + kOffControlCmp, data, "跳过 AddMember 注册(不可控)", mb, log);
     } else {
         int ctrl = GetControlVal(mem, mb);
-        std::vector<unsigned char> data = {0x83, 0x3d, 0xcc, 0x88, 0xbb, 0x53,
-                                           static_cast<unsigned char>(ctrl & 0xFF)};
-        PatchBytes(mem, mb + kOffControlCmp, data, "恢复 AddMember 注册", mb, log);
+        PatchBytes(mem, mb + kOffControlCmp, MakeControlCmp(static_cast<unsigned char>(ctrl & 0xFF)),
+                   "恢复 AddMember 注册", mb, log);
     }
 }
 
@@ -269,12 +298,12 @@ void PatchMatcher(ProcessMemory& mem, uintptr_t mb, bool on, std::string& log) {
 // 刺客名字槽: on=克隆刺客长名写进朱厌/善翼槽; off=写回原版野兽长名。
 void CmdCike(ProcessMemory& mem, bool on, std::string& log) {
     if (on) {
-        std::vector<unsigned char> bow = mem.Read(mem.ReadUInt32(kRecBow), 12);
-        std::vector<unsigned char> knife = mem.Read(mem.ReadUInt32(kRecKnife), 12);
-        mem.Write(kNameShanYi, bow);    // 善翼槽 -> 克隆刺客弓
-        mem.Write(kNameZhuYan, knife);  // 朱厌槽 -> 克隆刺客刀
-        log += "  刺客名字槽已打: 0x" + Hex8(kNameShanYi) + "=克隆刺客弓, 0x" +
-               Hex8(kNameZhuYan) + "=克隆刺客刀\n";
+        std::vector<unsigned char> bow = mem.Read(mem.ReadUInt32(RT(kOffRecBow)), 12);
+        std::vector<unsigned char> knife = mem.Read(mem.ReadUInt32(RT(kOffRecKnife)), 12);
+        mem.Write(RT(kOffNameShanYi), bow);    // 善翼槽 -> 克隆刺客弓
+        mem.Write(RT(kOffNameZhuYan), knife);  // 朱厌槽 -> 克隆刺客刀
+        log += "  刺客名字槽已打: 0x" + Hex8(RT(kOffNameShanYi)) + "=克隆刺客弓, 0x" +
+               Hex8(RT(kOffNameZhuYan)) + "=克隆刺客刀\n";
         log += "  用法: type 10 -> cike_bow(弓); type 9 -> cike_knife(刀)\n";
     } else {
         // 直接写回原版野兽长名(不依赖备份文件): 只写 3 个槽地址, 不碰槽外数据
@@ -282,9 +311,9 @@ void CmdCike(ProcessMemory& mem, bool on, std::string& log) {
             uintptr_t addr;
             const char* name;
         };
-        const SlotName kRestore[] = {{0x539771A4, "召唤兽狍鸮"},
-                                     {kNameZhuYan, "召唤兽朱厌"},
-                                     {kNameShanYi, "召唤兽善翼"}};
+        const SlotName kRestore[] = {{RT(kOffNamePaoXiao), "召唤兽狍鸮"},
+                                     {RT(kOffNameZhuYan), "召唤兽朱厌"},
+                                     {RT(kOffNameShanYi), "召唤兽善翼"}};
         for (const auto& s : kRestore) {
             std::string g = Utf8ToGbk(s.name);
             g.push_back('\0');
@@ -339,7 +368,7 @@ bool RestoreQinBackup(ProcessMemory& mem) {
             }
             int rec = std::atoi(kv.first.c_str());
             try {
-                mem.WriteUInt32(kQinTable + 8 + static_cast<uintptr_t>(rec) * kQinStride +
+                mem.WriteUInt32(RT(kOffQinTable) + 8 + static_cast<uintptr_t>(rec) * kQinStride +
                                     static_cast<uintptr_t>(off),
                                 static_cast<uint32_t>(v));
                 ++n;
@@ -363,12 +392,17 @@ bool RestoreQinBackup(ProcessMemory& mem) {
 // scratch 分配(写唯一短名标签用, 需高地址: 低位会被游戏意外访问而崩溃)
 // ---------------------------------------------------------------------------
 uintptr_t AllocScratch(ProcessMemory& mem) {
-    try {
-        // 从 0x70000000 向下扫空闲页(等价 python 依次尝试固定高地址基址)
-        return mem.Alloc(0x4000, 0x70000000);
-    } catch (...) {
-        return mem.Alloc(0x4000);  // ANY 兜底
+    // 依次试固定高地址基址(低位 VirtualAllocEx 会被游戏意外访问而崩溃, python 同款
+    // 6 级), 已被占用则跳过, 全占再 ANY 兜底。
+    const uintptr_t kBases[] = {0x70000000, 0x60000000, 0x50000000, 0x40000000, 0x30000000,
+                                0x20000000};
+    for (uintptr_t b : kBases) {
+        try {
+            if (uintptr_t a = mem.Alloc(0x4000, b)) return a;
+        } catch (...) {
+        }
     }
+    return mem.Alloc(0x4000);
 }
 
 class QinScratch {
@@ -409,13 +443,13 @@ std::optional<std::vector<int>> ResolveQinSub(ProcessMemory& mem, int group_idx,
     std::vector<int> recs;
     uint32_t cnt = 0;
     try {
-        cnt = mem.ReadUInt32(kQinTable);
+        cnt = mem.ReadUInt32(RT(kOffQinTable));
     } catch (...) {
         cnt = 0;
     }
     uint32_t limit = cnt < kMaxRec ? cnt : kMaxRec;
     for (uint32_t i = 0; i < limit; ++i) {
-        uintptr_t base = kQinTable + 8 + static_cast<uintptr_t>(i) * kQinStride;
+        uintptr_t base = RT(kOffQinTable) + 8 + static_cast<uintptr_t>(i) * kQinStride;
         uint32_t p0 = 0, p1 = 0;
         try {
             p0 = mem.ReadUInt32(base);
@@ -423,7 +457,7 @@ std::optional<std::vector<int>> ResolveQinSub(ProcessMemory& mem, int group_idx,
         } catch (...) {
             continue;
         }
-        if (!p0 || !p1 || p0 == kQinNullPtr || p1 == kQinNullPtr) continue;
+        if (!p0 || !p1 || p0 == RT(kOffQinNullPtr) || p1 == RT(kOffQinNullPtr)) continue;
         if (!(0x20000000 <= p0 && p0 < 0x90000000) || !(0x20000000 <= p1 && p1 < 0x90000000))
             continue;
         std::string s1 = RStr(mem, p1, 16);
@@ -451,7 +485,7 @@ void WriteSlot10(ProcessMemory& mem, const std::string& name, std::string& log) 
     (void)log;  // 该函数不产生日志(调用方自行记录自校验结果)
     std::string g = Utf8ToGbk(name);
     g.push_back('\0');
-    mem.Write(kNameShanYi, std::vector<unsigned char>(g.begin(), g.end()));
+    mem.Write(RT(kOffNameShanYi), std::vector<unsigned char>(g.begin(), g.end()));
 }
 
 // 1/2/6 大类(长名>10B): 目标子类第一条 field[0] 重定向 scratch 标签 Q###, 槽10=Q###.
@@ -476,7 +510,7 @@ bool SummonQinField0Tag(ProcessMemory& mem, uintptr_t mb, int group_idx, int sub
     std::string tag = tagbuf;
     QinScratch scr(mem);
     uintptr_t tp = scr.Put(tag);
-    uintptr_t base = kQinTable + 8 + static_cast<uintptr_t>(rec) * kQinStride;
+    uintptr_t base = RT(kOffQinTable) + 8 + static_cast<uintptr_t>(rec) * kQinStride;
     uint32_t orig = mem.ReadUInt32(base);
     std::string s0 = RStr(mem, orig, 32);
     mem.WriteUInt32(base, static_cast<uint32_t>(tp));  // field[0] -> 唯一标签
@@ -488,7 +522,7 @@ bool SummonQinField0Tag(ProcessMemory& mem, uintptr_t mb, int group_idx, int sub
     std::string s10, s0now;
     try {
         imm = mem.Read(mb + kOffMatcherImm, 1)[0];
-        s10 = RStr(mem, kNameShanYi, 8);
+        s10 = RStr(mem, RT(kOffNameShanYi), 8);
         s0now = RStr(mem, mem.ReadUInt32(base), 32);
     } catch (const std::exception& e) {
         log += std::string("  [!!] 自校验读取异常: ") + e.what() + "\n";
@@ -498,7 +532,7 @@ bool SummonQinField0Tag(ProcessMemory& mem, uintptr_t mb, int group_idx, int sub
                s0now + " (期望 0/" + tag + ")";
         // 附原始字节,便于定位写入是否落盘
         try {
-            auto b10 = mem.Read(kNameShanYi, 8);
+            auto b10 = mem.Read(RT(kOffNameShanYi), 8);
             auto bf = mem.Read(mem.ReadUInt32(base), 8);
             log += " 槽10hex=" + Hex8Bytes(b10) + " f0hex=" + Hex8Bytes(bf);
         } catch (...) {
@@ -526,7 +560,7 @@ bool SummonQinLongname(ProcessMemory& mem, uintptr_t mb, int group_idx, int sub_
         return false;
     }
     int rec = (*recs)[0];
-    uint32_t p0 = mem.ReadUInt32(kQinTable + 8 + static_cast<uintptr_t>(rec) * kQinStride);
+    uint32_t p0 = mem.ReadUInt32(RT(kOffQinTable) + 8 + static_cast<uintptr_t>(rec) * kQinStride);
     std::string long_name = RStr(mem, p0, 32);
     if (Utf8ToGbk(long_name).size() > 10) return false;  // 长名放不进槽10
     RestoreQinBackup(mem);
@@ -536,7 +570,7 @@ bool SummonQinLongname(ProcessMemory& mem, uintptr_t mb, int group_idx, int sub_
     std::string s10;
     try {
         imm = mem.Read(mb + kOffMatcherImm, 1)[0];
-        s10 = RStr(mem, kNameShanYi, 12);
+        s10 = RStr(mem, RT(kOffNameShanYi), 12);
     } catch (...) {
     }
     if (imm != 0 || s10 != long_name) {
@@ -574,6 +608,54 @@ int ParseInt(const std::string& s) {
     return static_cast<int>(std::strtol(s.c_str(), nullptr, 0));
 }
 
+// 运行时定位自检:偏移过期(游戏更新)时立刻中止,而不是把补丁写进无关内存崩游戏
+// —— 这正是本次 ASLR 修复要根除的故障模式,所以入口必须先验证。
+bool VerifyRuntime(ProcessMemory& mem, std::string& log) {
+    log += "  EasyRPG.dll 基址 = 0x" + Hex8(g_mb) + "\n";
+    try {
+        // 控制标志实测:权威来源 = MB+0x3585F 的原版 `A1 <imm32>`(mov eax,[flag],本工具
+        // 打补丁前从不改写它, 游戏重定位已把立即数填成运行时真值)。MB+0x35C32 的
+        // cmp [flag],imm 会被本工具自己覆盖, 只能作辅证不能作准。
+        auto t = mem.Read(g_mb + kOffType, 5);
+        if (t[0] == 0xA1) {
+            uint32_t tflag = t[1] | (t[2] << 8) | (t[3] << 16) | (t[4] << 24);
+            if (tflag != RT(kOffFlag)) {
+                log += "  [!!] 控制标志实测 0x" + Hex8(tflag) + " != 偏移推导 0x" +
+                       Hex8(RT(kOffFlag)) + " —— 以实测(A1)为准\n";
+            }
+            g_flag = tflag;
+        } else {
+            g_flag = static_cast<uint32_t>(RT(kOffFlag));
+            auto op = mem.Read(g_mb + kOffControlCmp, 7);
+            if (op[0] == 0x83 && op[1] == 0x3D) {
+                uint32_t observed = op[2] | (op[3] << 8) | (op[4] << 16) | (op[5] << 24);
+                if (observed != g_flag)
+                    log += "  [??] cmp 现场地址 0x" + Hex8(observed) + " != 推导 0x" +
+                           Hex8(g_flag) + " (mov 指令已被补丁覆盖, 无法交叉验证, 保持推导)\n";
+            }
+        }
+        uint32_t cnt = mem.ReadUInt32(RT(kOffQinTable));
+        if (cnt == 0 || cnt > 10000) {
+            log += "  [!!] 秦兵表 cnt=" + std::to_string(cnt) + " 异常 —— 偏移已过期, 中止\n";
+            return false;
+        }
+        uint32_t p0 =
+            mem.ReadUInt32(RT(kOffQinTable) + 8 + static_cast<uintptr_t>(kRecBowIdx) * kQinStride);
+        std::string s0 = RStr(mem, p0, 32);
+        log += "  秦兵表 cnt=" + std::to_string(cnt) + ", rec" + std::to_string(kRecBowIdx) +
+               " 长名='" + s0 + "'";
+        if (s0.find("刺客弓") == std::string::npos) {
+            log += " (期望含'刺客弓') [!!] 偏移已过期, 中止\n";
+            return false;
+        }
+        log += " ✓ 运行时定位自检通过\n";
+        return true;
+    } catch (const std::exception& e) {
+        log += std::string("  [!!] 运行时定位自检读取失败: ") + e.what() + " —— 中止\n";
+        return false;
+    }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -584,6 +666,8 @@ std::string CmdSummon(ProcessMemory& mem, uintptr_t mb, const std::vector<std::s
     if (mb == 0) {
         throw std::runtime_error("Steam 版模块基址无效(EasyRPG.dll 未找到?)");
     }
+    g_mb = mb;
+    if (!VerifyRuntime(mem, log)) return log;
 
     std::map<std::string, std::string> d = ParseArgs(args);
     // 冲突检测: 三类互斥, 冲突回退 mon_type=0
@@ -619,7 +703,7 @@ std::string CmdSummon(ProcessMemory& mem, uintptr_t mb, const std::vector<std::s
             RestoreQinBackup(mem);
             PatchMatcher(mem, mb, false, log);
             CmdCike(mem, false, log);
-            mem.Write(kNameShanYi, std::vector<unsigned char>(12, 0));  // 清空善翼槽
+            mem.Write(RT(kOffNameShanYi), std::vector<unsigned char>(12, 0));  // 清空善翼槽
             slot = 10;
             label = "随机秦兵 (类别11路径, 游戏系统随机)";
         } else {
