@@ -75,6 +75,16 @@ public:
     /// memlib.py iter_regions). Scans 0..0x7FFFFFFF (32-bit target space).
     std::vector<RegionInfo> EnumerateRegions();
 
+    /// 写 `data` 到目标进程(数据)。校验 VirtualProtectEx / bytes_written, 并恢复页面保护。
+    void Write(uintptr_t base_address, const std::vector<unsigned char>& data);
+
+    /// 写机器码: 同 Write, 成功后额外 FlushInstructionCache(否则目标 CPU 可能仍执行旧指令)。
+    void WriteCode(uintptr_t base_address, const std::vector<unsigned char>& code);
+
+    /// Write/WriteCode 的共同实现(is_code 决定是否 flush 指令缓存)。
+    void WriteInternal(uintptr_t base_address, const unsigned char* data, size_t size,
+                       bool is_code);
+
     /// Read `n_size` bytes from `base_address`. Throws std::runtime_error on failure.
     std::vector<unsigned char> Read(uintptr_t base_address, int n_size);
 
@@ -100,10 +110,6 @@ public:
     /// if the decoded text is empty/garbage (caller shows "未知物品").
     std::optional<std::string> ReadStringGbk(uintptr_t base_address, int max_len, int codepage);
 
-    /// Write `data` to `base_address`. Attempts to flip the target page to
-    /// PAGE_EXECUTE_READWRITE first, since some game memory is read-only.
-    void Write(uintptr_t base_address, const std::vector<unsigned char>& data);
-
     /// Write a 4-byte DWORD.
     void WriteUInt32(uintptr_t base_address, unsigned int value);
 
@@ -128,6 +134,20 @@ public:
     /// Run `stub` in a remote thread and wait up to `wait_ms` milliseconds. On
     /// completion, read the int32 at `result_slot` as the return value. Returns
     /// nullopt on timeout (the thread is terminated) or if the read fails.
+    // 计划 P1/P2(#8): 远程线程调用结果不再用 nullopt 混表 timeout/失败/未知。
+    enum class RemoteCallStatus {
+        kCompleted,             // 正常返回, value 有效
+        kFailed,                // 未拿到返回值(读取失败等)
+        kTimedOutStillRunning,  // 超时且线程被强制终止 —— 目标进程状态已不可信
+        kProcessExited,         // 目标进程已退出
+    };
+    struct RemoteCallResult {
+        RemoteCallStatus status = RemoteCallStatus::kFailed;
+        int value = 0;
+        bool ok() const { return status == RemoteCallStatus::kCompleted; }
+    };
+    RemoteCallResult CallRemoteThreadDetailed(uintptr_t stub, int wait_ms, uintptr_t result_slot);
+
     std::optional<int> CallRemoteThread(uintptr_t stub, int wait_ms, uintptr_t result_slot);
 
     /// Look up an exported function address (PE32) inside a target-process module.
@@ -142,8 +162,12 @@ public:
     /// Parse a hex address string ("0x901FF0" or "901FF0") into an address.
     static uintptr_t ParseAddress(const std::string& s);
 
+    /// 目标进程是否仍存活(句柄有效且未退出)。
+    bool IsProcessAlive() const;
+
 private:
     void* handle_ = nullptr;  // HANDLE
+    unsigned int pid_ = 0;    // 目标进程 id(判断进程是否退出用)
 };
 
 }  // namespace poq

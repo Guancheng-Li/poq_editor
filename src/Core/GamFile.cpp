@@ -177,9 +177,9 @@ const std::vector<GamFile::FieldDesc>& GamFile::FieldList() {
     return k;
 }
 
-int32_t GamItem::GetField(const char* name, bool* ok) const {
+int32_t GamItem::GetField(const char* key, bool* ok) const {
     const FieldDef* def = nullptr;
-    for (const auto& f : kFields) if (strcmp(f.name, name) == 0) { def = &f; break; }
+    for (const auto& f : kFields) if (strcmp(f.name, key) == 0) { def = &f; break; }
     if (!def) { if (ok) *ok = false; return 0; }
     size_t off = aend + def->off;
     if (off + 4 > content.size()) { if (ok) *ok = false; return 0; }
@@ -188,9 +188,9 @@ int32_t GamItem::GetField(const char* name, bool* ok) const {
     return (int32_t)v;  // -1 = 空
 }
 
-bool GamItem::SetField(const char* name, int64_t v) {
+bool GamItem::SetField(const char* key, int64_t v) {
     const FieldDef* def = nullptr;
-    for (const auto& f : kFields) if (strcmp(f.name, name) == 0) { def = &f; break; }
+    for (const auto& f : kFields) if (strcmp(f.name, key) == 0) { def = &f; break; }
     if (!def) return false;
     size_t off = aend + def->off;
     if (off + 4 > content.size()) return false;
@@ -712,13 +712,13 @@ bool GamItem::SyncAffixesFromGInfo() {
     // 免得只改了个名字/等级就把这类占位节点丢掉。
     for (const auto& old : affixes) {
         if (old.value != 0.0f) continue;
-        bool used = false;
+        bool got_slot = false;
         for (const auto& nd : list)
             if (nd.id == old.id) {
-                used = true;
+                got_slot = true;
                 break;
             }
-        if (!used) list.push_back(old);
+        if (!got_slot) list.push_back(old);
     }
 
     return SetAffixes(list);
@@ -783,13 +783,12 @@ bool GamItem::ParseGInfoRows(std::vector<GInfoRow>& rows) const {
     if (txt.empty()) return false;
     char cur_color = 0;
     // 逐行(记录字节偏移, 供值重写)
-    size_t pos = 0;
-    while (pos <= txt.size()) {
-        size_t nl = txt.find('\n', pos);
-        std::string line = (nl == std::string::npos) ? txt.substr(pos) : txt.substr(pos, nl - pos);
+    size_t scan = 0;  // 逐行扫描游标(不叫 pos: 遮蔽 GamItem::pos 成员)
+    while (scan <= txt.size()) {
+        size_t nl = txt.find('\n', scan);
+        std::string line = (nl == std::string::npos) ? txt.substr(scan) : txt.substr(scan, nl - scan);
         bool group_ends = false;
         std::string inner = line;
-        size_t inner_start = pos;  // inner 相对 txt 的字节偏移(该行开头)
         // [K / [H / [Z ... (可跨行: 组首行只写 "["+字母, ']' 落在组末行行尾)
         size_t n = inner.size();
         size_t k = 0;
@@ -822,12 +821,12 @@ bool GamItem::ParseGInfoRows(std::vector<GInfoRow>& rows) const {
                         if ((uint8_t)inner[k + j] >= 0x81 && k + j + 1 < n) j += 2;
                         else j += 1;
                     }
-                    std::string name = inner.substr(k + t0, j - t0);
-                    is_header = (name == "Lv" || name == "Lv.");
+                    std::string token = inner.substr(k + t0, j - t0);  // 不叫 name: 遮蔽成员
+                    is_header = (token == "Lv" || token == "Lv.");
                 }
                 if (!is_header) {
                     // 属性名 ... 值
-                    std::string name;
+                    std::string attr;  // 不叫 name: 会遮蔽 GamItem::name 成员
                     long vmin = 0, vmax = 0;
                     // 名字到第一个空白
                     size_t j = t0;
@@ -835,7 +834,7 @@ bool GamItem::ParseGInfoRows(std::vector<GInfoRow>& rows) const {
                         if ((uint8_t)inner[k + j] >= 0x81 && k + j + 1 < n) j += 2;
                         else j += 1;
                     }
-                    name = inner.substr(k + t0, j - t0);
+                    attr = inner.substr(k + t0, j - t0);
                     // 跳过空白
                     size_t vp = j;
                     while (vp < n - k && (inner[k + vp] == ' ' || inner[k + vp] == '\t')) ++vp;
@@ -873,7 +872,7 @@ bool GamItem::ParseGInfoRows(std::vector<GInfoRow>& rows) const {
                         }
                         GInfoRow r{};
                         r.color = cur_color;
-                        r.name = name;
+                        r.name = attr;
                         r.vmin = vmin;
                         r.vmax = 0;
                         r.has_max = false;
@@ -883,7 +882,7 @@ bool GamItem::ParseGInfoRows(std::vector<GInfoRow>& rows) const {
                             // 上限是独立词条: 拆成 "最大<名>" 一行(UI 同道具修改; 保存时再合成 "名 +v ~ +w")
                             GInfoRow r2{};
                             r2.color = cur_color;
-                            r2.name = std::string("\xD7\xEE\xB4\xF3") + name;  // GBK "最大"
+                            r2.name = std::string("\xD7\xEE\xB4\xF3") + attr;  // GBK "最大"
                             r2.vmin = vmax;
                             r2.is_percent = is_percent;
                             rows.push_back(std::move(r2));
@@ -894,7 +893,7 @@ bool GamItem::ParseGInfoRows(std::vector<GInfoRow>& rows) const {
         }
         if (group_ends) cur_color = 0;
         if (nl == std::string::npos) break;
-        pos = nl + 1;
+        scan = nl + 1;
     }
     // 文本非空即成功: 0 行(词条删光)也是合法结果 —— 不能用 rows.empty() 当失败,
     // 否则 SyncAffixesFromGInfo 会放弃重建, "删光词条"就写不进数组(P0)。
@@ -920,8 +919,8 @@ std::string GamItem::GetGInfoHeader() const {
     // 名字 token 是否为 Lv / Lv.
     size_t j = t0;
     while (j < first.size() && (uint8_t)first[j] > 0x20) ++j;
-    std::string name = first.substr(t0, j - t0);
-    if (name == "Lv" || name == "Lv.") {
+    std::string token = first.substr(t0, j - t0);  // 不叫 name: 遮蔽成员
+    if (token == "Lv" || token == "Lv.") {
         return (nl == std::string::npos) ? first : first + "\n";
     }
     return "";

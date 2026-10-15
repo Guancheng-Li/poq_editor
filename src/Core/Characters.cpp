@@ -113,8 +113,8 @@ const std::vector<CharFieldCfg>& CharFields() {
         CharFieldCfg{"性别", 0x10, 0, CharKind::Enum, {{0, "男"}, {1, "女"}}, std::nullopt, std::nullopt, std::nullopt},
         CharFieldCfg{"等级", 0x0C, 0, CharKind::Dword, {}, 1, 99, std::nullopt},
         CharFieldCfg{"年龄", 0x14, 0, CharKind::Dword, {}, 1, 99, std::nullopt},
-        CharFieldCfg{"经验", 0x1C, 0, CharKind::Dword, {}, 0, std::nullopt, std::nullopt},
-        CharFieldCfg{"下一级", 0x20, 0, CharKind::Dword, {}, 0, std::nullopt, std::nullopt},
+        // 经验/下一级 合成一对(UI 一个字段两个框, 中间斜杠; 与生命/精气同款)
+        CharFieldCfg{"经验", 0x1C, 0x20, CharKind::Pair, {}, 0, std::nullopt, std::nullopt},
         CharFieldCfg{"声望", 0x28, 0, CharKind::Word, {}, 0, 65535, std::nullopt},
         CharFieldCfg{"生命", 0x30, 0x34, CharKind::Pair, {}, 0, 999999, std::nullopt},
         CharFieldCfg{"精气", 0x38, 0x3C, CharKind::Pair, {}, 0, 999999, std::nullopt},
@@ -138,6 +138,11 @@ const std::vector<CharFieldCfg>& CharFields() {
         CharFieldCfg{"土防御", 0xA8, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
         CharFieldCfg{"闪避率", 0xAC, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
         CharFieldCfg{"命中率", 0xB0, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
+        // 视野: +0x198, 装"视野 +X"装备时该字段 +(X)(2026-09-24 差分实测: 175 -> 200)。
+        // 注: 实测直接 WriteProcessMemory 改此字段会导致游戏崩溃(原因待查, 见 docs/260929_todo_list.md
+        // 第四节)。按用户要求**保持可编辑**(崩溃机制要靠实验定位, 不能先用只读掩盖),
+        // 因此这里 writable 仍为 true。
+        CharFieldCfg{"视野", 0x198, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
         CharFieldCfg{"剩余属性点", 0x274, 0, CharKind::Word, {}, 0, 65535, std::nullopt},
         CharFieldCfg{"剩余技能点", 0x278, 0, CharKind::Word, {}, 0, 65535, std::nullopt},
     };
@@ -331,17 +336,25 @@ bool WriteCharField(ProcessMemory& mem, uintptr_t base, const CharFieldCfg& f, c
             return true;
         }
         if (f.kind == CharKind::StringPtr) {
-            // 字符串原地写(限 50 字符,GBK,按字符边界截断)
+            // 字符串原地写。计划 P1/P2(#10): "上限 50 字符"不代表目标 buffer 有 50 字符容量 ——
+            // 旧实现无条件写最多 101 字节, 旧字符串只分配了很小空间时会覆盖相邻堆对象。
+            // 保守策略: 只写"不超过当前字符串实际长度"的内容(装得下才写), 硬上限 100 字节。
             uintptr_t ptr = mem.ReadUInt32(base + f.offset_lo);
             if (ptr == 0 || ptr == 0xFFFFFFFF) return false;
+            const size_t kMaxStringBytes = 100;  // 50 个汉字
+            size_t curLen = 0;
+            try {
+                auto opt = mem.ReadStringGbk(ptr, kMaxStringBytes + 1, 936);
+                curLen = opt ? opt->size() : 0;
+            } catch (...) {
+                curLen = 0;  // 读不到现值 -> 按最小容量处理
+            }
+            const size_t limit = std::min(curLen, kMaxStringBytes);
             std::string data;
-            int count = 0;
             for (uint32_t cp : Utf8ToCodepoints(v.str)) {
-                if (count >= 50) break;
                 std::string chb = GbkEncodeOne(cp);
-                if (data.size() + chb.size() > 100) break;
+                if (data.size() + chb.size() > limit) break;
                 data += chb;
-                ++count;
             }
             data.push_back('\0');
             mem.Write(ptr, std::vector<unsigned char>(data.begin(), data.end()));

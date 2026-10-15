@@ -448,6 +448,7 @@ std::string LegalSubs(const QinGroup& g) {
 // 注意:结尾 \0 必须用 push_back/append 追加——`std::string + "\x00"` 会把 C 字符串
 // "\x00" 按 strlen(=0) 拼接,导致终止符丢失,槽10 残留旧名导致自校验失败/召唤错怪。
 void WriteSlot10(ProcessMemory& mem, const std::string& name, std::string& log) {
+    (void)log;  // 该函数不产生日志(调用方自行记录自校验结果)
     std::string g = Utf8ToGbk(name);
     g.push_back('\0');
     mem.Write(kNameShanYi, std::vector<unsigned char>(g.begin(), g.end()));

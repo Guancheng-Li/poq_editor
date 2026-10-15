@@ -197,6 +197,7 @@ std::optional<std::string> ProcessMemory::FindModulePath(unsigned int pid,
 bool ProcessMemory::Open(unsigned int pid, unsigned int access) {
     Close();
     handle_ = ::OpenProcess(access, FALSE, pid);
+    pid_ = handle_ != nullptr ? pid : 0;  // 记录目标 pid(IsProcessAlive 用)
     return handle_ != nullptr;
 }
 
@@ -205,6 +206,7 @@ void ProcessMemory::Close() {
         ::CloseHandle(handle_);
         handle_ = nullptr;
     }
+    pid_ = 0;
 }
 
 std::vector<RegionInfo> ProcessMemory::EnumerateRegions() {
@@ -316,19 +318,60 @@ std::optional<std::string> ProcessMemory::ReadStringGbk(uintptr_t base_address, 
 }
 
 void ProcessMemory::Write(uintptr_t base_address, const std::vector<unsigned char>& data) {
+    WriteInternal(base_address, data.data(), data.size(), false);
+}
+
+void ProcessMemory::WriteCode(uintptr_t base_address, const std::vector<unsigned char>& code) {
+    WriteInternal(base_address, code.data(), code.size(), true);
+}
+
+void ProcessMemory::WriteInternal(uintptr_t base_address, const unsigned char* data,
+                                  size_t size, bool is_code) {
+    // 计划 P1(#7): 完整检查 + 恢复页面保护 + 代码写后 flush 指令缓存。
+    // 原实现漏检 VirtualProtectEx 返回值、从不恢复 old_protect、不校验 bytes_written,
+    // 写机器码后也没 flush —— 目标 CPU 可能仍执行旧指令缓存。
     if (handle_ == nullptr) throw std::runtime_error("进程未打开");
+    if (data == nullptr || size == 0) return;
+    if (size > (size_t)INT_MAX) throw std::runtime_error("写入长度超出范围");
+
     DWORD old_protect = 0;
-    ::VirtualProtectEx(handle_, reinterpret_cast<LPVOID>(base_address),
-                       static_cast<SIZE_T>(data.size()), PAGE_EXECUTE_READWRITE, &old_protect);
+    if (!::VirtualProtectEx(handle_, reinterpret_cast<LPVOID>(base_address),
+                             static_cast<SIZE_T>(size), PAGE_EXECUTE_READWRITE, &old_protect)) {
+        DWORD err = ::GetLastError();
+        throw std::runtime_error("VirtualProtectEx 失败 @ " + AddrHex(base_address) + ": " +
+                                 FormatWin32Error(err));
+    }
+    // 无论成功失败都恢复原页面保护(RAII: 抛异常时也会执行)
+    struct ProtectGuard {
+        HANDLE h;
+        LPVOID a;
+        SIZE_T n;
+        DWORD old;
+        ~ProtectGuard() {
+            DWORD ignored = 0;
+            ::VirtualProtectEx(h, a, n, old, &ignored);
+        }
+    } guard{handle_, reinterpret_cast<LPVOID>(base_address), static_cast<SIZE_T>(size),
+            old_protect};
+
     SIZE_T bytes_written = 0;
-    BOOL ok = ::WriteProcessMemory(handle_,
-                                   reinterpret_cast<LPVOID>(base_address),
-                                   data.data(), static_cast<SIZE_T>(data.size()),
-                                   &bytes_written);
+    BOOL ok = ::WriteProcessMemory(handle_, reinterpret_cast<LPVOID>(base_address), data,
+                                   static_cast<SIZE_T>(size), &bytes_written);
     if (!ok) {
         DWORD err = ::GetLastError();
-        throw std::runtime_error("WriteProcessMemory 失败 @ " + AddrHex(base_address) +
-                                 ": " + FormatWin32Error(err));
+        throw std::runtime_error("WriteProcessMemory 失败 @ " + AddrHex(base_address) + ": " +
+                                 FormatWin32Error(err));
+    }
+    // 写成功不等于写全(跨页/部分写入会静默成功)
+    if (bytes_written != static_cast<SIZE_T>(size)) {
+        throw std::runtime_error("WriteProcessMemory 部分写入 @ " + AddrHex(base_address) + ": " +
+                                 std::to_string(bytes_written) + "/" + std::to_string(size) +
+                                 " 字节");
+    }
+    // 写机器码: 目标 CPU 可能仍在执行旧的指令缓存, 必须刷新
+    if (is_code) {
+        ::FlushInstructionCache(handle_, reinterpret_cast<LPCVOID>(base_address),
+                                static_cast<SIZE_T>(size));
     }
 }
 
@@ -401,14 +444,28 @@ uintptr_t ProcessMemory::Alloc(size_t size, uintptr_t near_addr) {
     return reinterpret_cast<uintptr_t>(p);
 }
 
+bool ProcessMemory::IsProcessAlive() const {
+    if (handle_ == nullptr || pid_ == 0) return false;
+    DWORD code = 0;
+    if (!::GetExitCodeProcess(handle_, &code)) return false;
+    return code == STILL_ACTIVE;
+}
+
 void ProcessMemory::Free(uintptr_t address) {
     if (!IsOpen()) return;
     ::VirtualFreeEx(handle_, reinterpret_cast<LPVOID>(address), 0, MEM_RELEASE);
 }
 
-std::optional<int> ProcessMemory::CallRemoteThread(uintptr_t stub, int wait_ms,
-                                                   uintptr_t result_slot) {
-    if (!IsOpen()) return std::nullopt;
+// 计划 P1/P2(#8): 超时不再直接 TerminateThread 后当作普通失败返回 ——
+// 被强杀的线程可能持有游戏内部锁 / 正在 malloc / 改全局对象, 目标进程可能已损坏,
+// 调用方需要知道"状态不可信", 并避免释放它可能仍在访问的 stub/buffer。
+ProcessMemory::RemoteCallResult ProcessMemory::CallRemoteThreadDetailed(
+    uintptr_t stub, int wait_ms, uintptr_t result_slot) {
+    RemoteCallResult rr;
+    if (!IsOpen()) {
+        rr.status = RemoteCallStatus::kFailed;
+        return rr;
+    }
     HANDLE h_thread = ::CreateRemoteThread(
         handle_, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(stub), nullptr, 0, nullptr);
     if (!h_thread) {
@@ -416,22 +473,34 @@ std::optional<int> ProcessMemory::CallRemoteThread(uintptr_t stub, int wait_ms,
         throw std::runtime_error("CreateRemoteThread 失败: " + FormatWin32Error(err));
     }
     DWORD r = ::WaitForSingleObject(h_thread, static_cast<DWORD>(wait_ms));
-    std::optional<int> out;
     if (r == WAIT_OBJECT_0) {
         try {
-            out = ReadInt32(result_slot);
-        } catch (...) {
-            out = std::nullopt;
+            rr.value = ReadInt32(result_slot);
+            rr.status = RemoteCallStatus::kCompleted;
+        } catch (const std::exception&) {
+            rr.status = RemoteCallStatus::kFailed;  // 线程结束了但读不到结果槽
         }
     } else if (r == WAIT_TIMEOUT) {
-        // 命令可能挂住:终止线程,超时返回(游戏可能已不稳定)。
+        // 超时: 线程可能正持有游戏内部锁/在改全局对象 —— 强杀会让目标进程状态不可信,
+        // 如实上报, 由调用方提示用户(重启游戏)并避免后续依赖一致性的操作。
         ::TerminateThread(h_thread, 0);
-        out = std::nullopt;
+        rr.status = RemoteCallStatus::kTimedOutStillRunning;
     } else {
-        out = std::nullopt;
+        rr.status = RemoteCallStatus::kFailed;
     }
     ::CloseHandle(h_thread);
-    return out;
+    // 进程已退出时统一上报 kProcessExited(远程内存随进程结束自动回收, 不必再管)
+    if (rr.status != RemoteCallStatus::kCompleted && !IsProcessAlive()) {
+        rr.status = RemoteCallStatus::kProcessExited;
+    }
+    return rr;
+}
+
+std::optional<int> ProcessMemory::CallRemoteThread(uintptr_t stub, int wait_ms,
+                                                   uintptr_t result_slot) {
+    auto rr = CallRemoteThreadDetailed(stub, wait_ms, result_slot);
+    if (!rr.ok()) return std::nullopt;
+    return rr.value;
 }
 
 uintptr_t ProcessMemory::FindExport(uintptr_t module_base, const std::string& name) {

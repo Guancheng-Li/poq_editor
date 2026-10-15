@@ -279,8 +279,9 @@ uint32_t ReadRights(Ctx& ctx) {
 // 远程线程直调 dispatch(token, rest)(对齐 dispatch_direct / dispatch_direct_130)
 // ---------------------------------------------------------------------------
 struct DispatchResult {
-    bool timed_out = false;
-    bool process_gone = false;
+    bool timed_out = false;     // 超时且远程线程被强杀(目标进程状态不可信)
+    bool process_gone = false;  // 调用期间目标进程退出
+    bool failed = false;        // 线程正常结束但没拿到结果
     int64_t value = 0;
 };
 
@@ -311,12 +312,27 @@ DispatchResult DispatchDirect(Ctx& ctx, const std::string& token, const std::str
         }
     }
     try {
+        // 计划 P1(#9): 远程缓冲是固定布局, 必须按 GBK 编码后校验边界 ——
+        // UTF-8 长度 != GBK 长度, 只靠 UI 输入框长度挡不住越界(会覆盖 stub/ret_slot)。
+        // 布局: base+0x000 token / +0x040 rest / +0x200 stub / +0x400 ret_slot
+        constexpr size_t kTokenOff = 0x000, kRestOff = 0x040;
+        constexpr size_t kStubOff = 0x200;
         std::string t = Utf8ToGbk(token);
         t.push_back('\0');
         std::string r = Utf8ToGbk(rest);
         r.push_back('\0');
-        mem.Write(base, ToBytes(t));
-        mem.Write(base + 0x40, ToBytes(r));
+        if (t.size() > kRestOff - kTokenOff) {
+            mem.Free(base);
+            throw std::runtime_error("GM 命令 token 过长: GBK " + std::to_string(t.size()) +
+                                     " 字节, 上限 " + std::to_string(kRestOff - kTokenOff - 1));
+        }
+        if (r.size() > kStubOff - kRestOff) {
+            mem.Free(base);
+            throw std::runtime_error("GM 命令参数过长: GBK " + std::to_string(r.size()) +
+                                     " 字节, 上限 " + std::to_string(kStubOff - kRestOff - 1));
+        }
+        mem.Write(base + kTokenOff, ToBytes(t));
+        mem.Write(base + kRestOff, ToBytes(r));
         mem.WriteUInt32(base + 0x400, 0);
         uintptr_t stub = base + 0x200;
         uintptr_t ret_slot = base + 0x400;
@@ -339,22 +355,30 @@ DispatchResult DispatchDirect(Ctx& ctx, const std::string& token, const std::str
         code.push_back(0xC3);
         mem.Write(stub, code);
 
-        std::optional<int> raw = mem.CallRemoteThread(stub, wait_ms, ret_slot);
+        auto rr = mem.CallRemoteThreadDetailed(stub, wait_ms, ret_slot);
         DispatchResult res;
         if (!IsProcessAlive(ctx.pid)) {
             res.process_gone = true;
-        } else if (!raw) {
+        } else if (rr.status == ProcessMemory::RemoteCallStatus::kTimedOutStillRunning) {
+            // 计划 P1/P2(#8): 超时强杀后目标进程状态不可信 -> 明确标记, 提示用户重启游戏,
+            // 且**不能**释放仍可能被该线程访问的 stub/buffer(见下方 base 释放分支)。
             res.timed_out = true;
+        } else if (!rr.ok()) {
+            res.timed_out = false;
+            res.failed = true;
         } else {
             // 1.30 返回值有符号化(uint32 -> int32);steam 保留原始无符号值。
-            uint32_t u = static_cast<uint32_t>(*raw);
+            uint32_t u = static_cast<uint32_t>(rr.value);
             res.value = signextend ? static_cast<int64_t>(static_cast<int32_t>(u))
                                    : static_cast<int64_t>(u);
         }
-        // 每次调用后释放远程内存(对齐 python 每次 VirtualFreeEx)
-        try {
-            mem.Free(base);
-        } catch (...) {
+        // 正常/失败但线程已结束: 释放远程内存(对齐 python 每次 VirtualFreeEx)。
+        // 超时强杀时**不释放** —— 线程可能仍在执行 stub 里的代码, 释放会让它跳进已释放内存。
+        if (!res.timed_out) {
+            try {
+                mem.Free(base);
+            } catch (...) {
+            }
         }
         return res;
     } catch (...) {

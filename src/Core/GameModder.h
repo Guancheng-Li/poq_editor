@@ -55,7 +55,24 @@ public:
     bool IsHookInjected(unsigned int pid);
 
     /// 关闭进程句柄。若是本工具自注入,则还原原始字节并释放 cave;复用外部注入则不还原。
-    void Close();
+    // Close() 结果: hook 是否已还原、cave/节点池是否已释放。
+    // 不变量(计划 P0): 只要 hook 仍指向 cave, cave 绝不能被释放。
+    struct CloseResult {
+        bool hook_restored = true;   // hook 字节已写回并读回校验通过(非自注入时为 true)
+        bool cave_freed = true;      // code cave 已释放
+        bool pool_freed = true;      // 词条节点池已释放
+        bool process_exited = false; // 目标进程已退出(远程内存随进程释放, 无需再管)
+        std::string error;           // 失败原因(有内容表示需要提示用户)
+    };
+    /// 关闭并还原注入。正常路径会抛异常报告失败(除非进程已退出);
+    /// 析构/兜底请用 CloseNoThrow()。
+    CloseResult Close();
+    /// 不抛异常的关闭(析构兜底): 失败只记录到 last_close_error()。
+    void CloseNoThrow();
+    /// 同 CloseNoThrow, 但把结果交回调用方(退出路径要记录失败原因)。
+    CloseResult CloseNoThrowResult();
+    /// 最近一次关闭失败的原因(CloseNoThrow/Close 失败时填充)。
+    const std::string& last_close_error() const { return last_close_error_; }
 
     /// 读取 cur_item 槽 = 当前物品指针(0 表示当前无物品)。
     uintptr_t GetItemPointer();
@@ -111,6 +128,8 @@ public:
 
 private:
     void ResetState();
+    bool last_close_failed_ = false;      // 上次关闭未能完全还原
+    std::string last_close_error_;        // 上次关闭失败原因
     void EnsureInjection();
     static bool IsHookOriginal(const std::vector<unsigned char>& orig);
     void Inject();

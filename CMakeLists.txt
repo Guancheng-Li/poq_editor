@@ -115,4 +115,9 @@ endif()
 # 默认 manifest,避免 CVT1100 资源重复(类型 MANIFEST 名称 1)。
 if(MSVC)
     target_link_options(PoqEditorImgui PRIVATE /MANIFEST:NO)
+    # 计划 P3(#19): 提高告警等级。/permissive- 收紧旧 MSVC 宽松行为。
+    # 先只开 /W4 不加 /WX(告警不当错误), 便于逐步清理。
+    target_compile_options(PoqEditorImgui PRIVATE /W4 /permissive-)
+    # C4996(_wfopen 等 CRT "不安全函数"提示)是 API 偏好而非缺陷, 项目按需选用 -> 关闭该类告警
+    target_compile_definitions(PoqEditorImgui PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()

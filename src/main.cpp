@@ -489,6 +489,8 @@ struct CharWidget {
     int pair_lo = 0;          // pair 下限
     int pair_hi = 0;          // pair 上限
     char strbuf[128] = {0};   // string_ptr(UTF-8,足够 50 个汉字)
+    bool loaded = false;      // 读取成功过; false = 该字段读失败, 禁止保存(否则误写 0)
+    bool dirty = false;       // 用户改动过(为将来 dirty-save 预留)
 };
 
 struct App {
@@ -1316,6 +1318,7 @@ const std::set<std::string>& AtkLabels() {
 
 // 字段在当前锁状态下是否应禁用编辑(无敌:生命/精气/防御/闪避率;一击必杀:攻击/命中率)。
 bool IsCharFieldLocked(const App& app, const std::string& label) {
+    // 字段固有只读优先(计划 P1 #2.3: UI 禁用状态直接来自字段定义)
     if (app.ck_invincible) {
         if (label == "生命" || label == "精气" || label == "闪避率" || DefLabels().count(label)) return true;
     }
@@ -1353,7 +1356,7 @@ void RebuildCharWidgets(App& app) {
         const auto& f = CharFields()[i];
         CharWidget& w = app.char_widgets[i];
         auto vit = values.find(f.label);
-        if (vit == values.end()) continue;  // 读取失败:保留默认 0
+        if (vit == values.end()) continue;  // 读取失败: loaded 保持 false -> 不会被保存(计划 P1 #4)
         const CharValue& v = vit->second;
         if (f.kind == CharKind::StringPtr) {
             std::snprintf(w.strbuf, sizeof(w.strbuf), "%s", v.str.c_str());
@@ -1363,6 +1366,7 @@ void RebuildCharWidgets(App& app) {
         } else {
             w.intval = v.lo;
         }
+        w.loaded = true;   // 只有真正读到才允许保存
     }
 }
 
@@ -1386,13 +1390,25 @@ void OnCharRead(App& app) {
             app.SetStatus("未定位到队员(可尝试取消过滤后再次读取属性)。");
             return;
         }
+        // 记住读取前选中的角色: 读取会刷新所有人, 但选中项不跳
+        std::string prev_sel =
+            (app.char_selected >= 0 &&
+             static_cast<size_t>(app.char_selected) < app.char_names.size())
+                ? app.char_names[static_cast<size_t>(app.char_selected)]
+                : "";
         app.char_addrs.clear();
         app.char_names.clear();
         for (auto& kv : located) {
             app.char_addrs[kv.first] = kv.second;  // map 供按名查找
             app.char_names.push_back(kv.first);     // 槽位顺序保留下拉框
         }
+        // 选中保持: 还在列表里就维持原选择; 不在(角色离队/被过滤)才默认第一项
         app.char_selected = 0;
+        for (size_t i = 0; i < app.char_names.size(); ++i)
+            if (app.char_names[i] == prev_sel) {
+                app.char_selected = static_cast<int>(i);
+                break;
+            }
         // 全局属性:从第 1 人读
         const std::string& first = app.char_names.front();
         auto g = ReadGlobalChar(app.modder.Mem(), app.char_addrs[first]);
@@ -1423,11 +1439,17 @@ void OnCharSave(App& app) {
     }
     const std::string& name = app.char_names[static_cast<size_t>(app.char_selected)];
     uintptr_t base = app.char_addrs[name];
-    // 1) 收集全部字段值
+    // 1) 收集字段值: 只收 "可写 且 读取成功" 的字段(计划 P1 #4)
+    //    未加载的字段跳过 -> 不会把"读取失败"当成"值=0"写回去
     std::map<std::string, CharValue> values;
+    int skipped_unloaded = 0;
     for (size_t i = 0; i < CharFields().size(); ++i) {
         const auto& f = CharFields()[i];
         const CharWidget& w = app.char_widgets[i];
+        if (!f.writable || !w.loaded) {
+            if (!f.writable || !w.loaded) ++skipped_unloaded;
+            continue;
+        }
         CharValue v;
         if (f.kind == CharKind::StringPtr) {
             v.str = w.strbuf;
@@ -1440,10 +1462,12 @@ void OnCharSave(App& app) {
         }
         values[f.label] = v;
     }
-    // 2) 校验全部字段(有非法则弹窗并拒绝,整次不写)
+    // 2) 校验收集到的字段(有非法则弹窗并拒绝,整次不写)
     std::vector<std::string> errors;
     for (const auto& f : CharFields()) {
-        auto err = ValidateValue(f, values[f.label]);
+        auto vit = values.find(f.label);
+        if (vit == values.end()) continue;  // 未收集(只读/未加载)
+        auto err = ValidateValue(f, vit->second);
         if (err) errors.push_back(*err);
     }
     if (!errors.empty()) {
@@ -1453,15 +1477,36 @@ void OnCharSave(App& app) {
         app.SetStatus("校验失败,未保存:" + name + "。");
         return;
     }
-    // 3) 校验通过,写入
+    // 3) 校验通过,逐字段写入并统计失败(计划 P2 #11: 部分失败要如实报告)
     int saved = 0;
+    std::vector<std::string> failed;
     for (const auto& f : CharFields()) {
-        if (WriteCharField(app.modder.Mem(), base, f, values[f.label])) ++saved;
+        auto vit = values.find(f.label);
+        if (vit == values.end()) continue;  // 未收集(只读/未加载)
+        if (WriteCharField(app.modder.Mem(), base, f, vit->second))
+            ++saved;
+        else
+            failed.push_back(f.label);
+    }
+    std::string tail_msg;
+    if (skipped_unloaded > 0) {
+        tail_msg = "\n\n跳过 " + std::to_string(skipped_unloaded) +
+                   " 个字段(只读或读取失败, 未写入)";
+    }
+    if (!failed.empty()) {
+        std::string m = "成功写入 " + std::to_string(saved) + " 个,失败 " +
+                        std::to_string(failed.size()) + " 个。\n失败字段:";
+        for (const auto& f : failed) m += " " + f;
+        m += tail_msg;
+        app.char_status = "保存部分失败:" + name;
+        app.SetStatus("保存部分失败:" + name + "。");
+        MsgBox("保存完成(部分失败)", m, MB_ICONWARNING);
+        return;
     }
     app.char_status = "保存完成:" + name + " " + std::to_string(saved) + " 个字段已写入。请在游戏中验证。";
     app.SetStatus("角色属性保存完成:" + name + "。");
     MsgBox("保存完成",
-           "请存档后重新读档查看变化，部分属性词条可能因道具属性加成与设定值不同",
+           "请存档后重新读档查看变化，部分属性词条可能因道具属性加成与设定值不同" + tail_msg,
            MB_ICONINFORMATION);
 }
 
@@ -1487,7 +1532,12 @@ void OnMoneyApply(App& app) {
         return;
     }
     const std::string& first = app.char_names.front();
-    WriteCharField(app.modder.Mem(), app.char_addrs[first], gf, v);
+    // 计划 P2(#12): 单字段路径也要检查写入结果, 不能忽略失败仍提示成功
+    if (!WriteCharField(app.modder.Mem(), app.char_addrs[first], gf, v)) {
+        app.SetStatus("金钱写入失败。");
+        MsgBox("写入失败", "金钱写入失败(目标进程可能已退出或页面不可写)。", MB_ICONERROR);
+        return;
+    }
     MsgBox("金钱已修改", "修改后丢弃金钱、购买商品、捡起金钱，数额才会更新", MB_ICONINFORMATION);
 }
 
@@ -3305,15 +3355,6 @@ static void RenderGamTree(App& app) {
 }
 
 // 词条颜色 -> 中文标签
-static const char* GamColorLabel(char c) {
-    switch (c) {
-        case 'K': return "蓝色";
-        case 'C': return "亮蓝色(激活隐藏)";
-        case 'Z': return "金色";
-        case 'H': return "暗蓝色(未激活隐藏)";
-        default:  return "白色";
-    }
-}
 static const char kGamColorLetters[] = {0, 'K', 'C', 'Z', 'H'};
 
 // 把当前物品的 G_Info 解析进编辑状态(隐藏头行, 只留词条)
@@ -3826,6 +3867,7 @@ void H2RenderBackupConfirm(App& app) {
 
 // 目录选择回调:设置初始选中目录。
 static int CALLBACK H2BrowseCallback(HWND hwnd, UINT uMsg, LPARAM lParam, LPARAM lpData) {
+    (void)lParam;  // 回调签名固定参数, 初始目录走 lpData
     if (uMsg == BFFM_INITIALIZED && lpData)
         ::SendMessageW(hwnd, BFFM_SETSELECTIONW, TRUE, lpData);  // lpData = 初始目录宽串
     return 0;
@@ -4128,6 +4170,7 @@ void RenderCharTab(App& app) {
         OnKillToggled(app, kill);
     }
 
+
     // ---- 角色选择 + 读取/保存 ----
     ImGui::Separator();
     ImGui::TextUnformatted("角色:");
@@ -4194,23 +4237,26 @@ void RenderCharTab(App& app) {
 
     ImGui::Separator();
 
-    // ---- 字段网格(task6 指定排列:3 列行 + 2 列行,各行子项等宽)----
-    static const char* kLayout[][3] = {
-        {"姓名", "别名", "职业"},
-        {"年龄", "性别", "等级"},
-        {"经验", "下一级", "声望"},
-        {"生命", "精气", nullptr},
-        {"力量", "体质", nullptr},
-        {"敏捷", "悟性", nullptr},
-        {"魅力", "智慧", nullptr},
-        {"普通攻击", "普通防御", nullptr},
-        {"金攻击", "金防御", nullptr},
-        {"木攻击", "木防御", nullptr},
-        {"水攻击", "水防御", nullptr},
-        {"火攻击", "火防御", nullptr},
-        {"土攻击", "土防御", nullptr},
-        {"闪避率", "命中率", nullptr},
-        {"剩余属性点", "剩余技能点", nullptr},
+    // ---- 字段网格(task6 指定排列:3 列行 + 2 列行)----
+    // 每格 = {字段名, 宽度权重}。权重用于让"经验"占两格宽(它是成对字段、渲染成两个输入框),
+    // 于是该行四个输入框(经验 lo/hi + 声望 + 视野)等宽。
+    struct CharCol { const char* label; int w; };
+    static const CharCol kLayout[][3] = {
+        {{"姓名", 1}, {"别名", 1}, {"职业", 1}},
+        {{"年龄", 1}, {"性别", 1}, {"等级", 1}},
+        {{"经验", 2}, {"声望", 1}, {"视野", 1}},
+        {{"生命", 1}, {"精气", 1}, {nullptr, 0}},
+        {{"力量", 1}, {"体质", 1}, {nullptr, 0}},
+        {{"敏捷", 1}, {"悟性", 1}, {nullptr, 0}},
+        {{"魅力", 1}, {"智慧", 1}, {nullptr, 0}},
+        {{"普通攻击", 1}, {"普通防御", 1}, {nullptr, 0}},
+        {{"金攻击", 1}, {"金防御", 1}, {nullptr, 0}},
+        {{"木攻击", 1}, {"木防御", 1}, {nullptr, 0}},
+        {{"水攻击", 1}, {"水防御", 1}, {nullptr, 0}},
+        {{"火攻击", 1}, {"火防御", 1}, {nullptr, 0}},
+        {{"土攻击", 1}, {"土防御", 1}, {nullptr, 0}},
+        {{"命中率", 1}, {"闪避率", 1}, {nullptr, 0}},   // 命中率/闪避率 左右对调
+        {{"剩余属性点", 1}, {"剩余技能点", 1}, {nullptr, 0}},
     };
 
     // 渲染一个字段(标签在上,输入框在下,填满列宽;pair 两个输入框 + "/")。
@@ -4222,7 +4268,17 @@ void RenderCharTab(App& app) {
         }
         const auto& f = CharFields()[static_cast<size_t>(idx)];
         CharWidget& w = app.char_widgets[static_cast<size_t>(idx)];
-        bool disabled = app.char_addrs.empty() || IsCharFieldLocked(app, label);
+        // 禁用条件: 没定位到人 / 模式锁定 / 字段固有只读 / 读取失败(不能把"读失败"改成 0 保存)
+        bool disabled = app.char_addrs.empty() || IsCharFieldLocked(app, label) || !f.writable ||
+                        !w.loaded;
+        if (!f.writable) {
+            ImGui::TextDisabled("%s(只读)", label);
+            return;
+        }
+        if (!w.loaded) {
+            ImGui::TextDisabled("%s(读取失败)", label);
+            return;
+        }
         ImGui::TextUnformatted(label);
         ImGui::BeginDisabled(disabled);
         std::string id = "##ch" + std::to_string(idx);
@@ -4270,15 +4326,16 @@ void RenderCharTab(App& app) {
     ImGui::BeginChild("charfields", ImVec2(-FLT_MIN, grid_h), ImGuiChildFlags_None,
                       ImGuiWindowFlags_None);
     for (size_t r = 0; r < sizeof(kLayout) / sizeof(kLayout[0]); ++r) {
-        int ncols = kLayout[r][2] ? 3 : 2;
+        int ncols = kLayout[r][2].label ? 3 : 2;
         char tid[32];
         std::snprintf(tid, sizeof(tid), "charrow%zu", r);
         if (ImGui::BeginTable(tid, ncols)) {
             for (int c = 0; c < ncols; ++c)
-                ImGui::TableSetupColumn(nullptr, ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn(nullptr, ImGuiTableColumnFlags_WidthStretch,
+                                        static_cast<float>(kLayout[r][c].w));
             ImGui::TableNextRow();
             for (int c = 0; c < ncols; ++c) {
-                if (ImGui::TableSetColumnIndex(c)) render_field(kLayout[r][c]);
+                if (ImGui::TableSetColumnIndex(c)) render_field(kLayout[r][c].label);
             }
             ImGui::EndTable();
         }
@@ -4332,9 +4389,14 @@ void RenderTopBar(App& app) {
             static_cast<size_t>(ver_sel) < app.mode_ids.size()) {
             const std::string& mid = app.mode_ids[static_cast<size_t>(ver_sel)];
             if (app.modder.Mem().IsOpen()) {
-                try {
-                    app.modder.Close();  // 还原旧模式注入,避免残留 hook
-                } catch (...) {
+                auto cr = app.modder.Close();  // 还原旧模式注入,避免残留 hook
+                if (!cr.hook_restored || !cr.cave_freed) {
+                    // 计划 P0: hook 没还原成功 -> 游戏里仍指向 cave, 必须让用户知道
+                    std::string msg = "旧版本的注入未能完全还原：\n";
+                    msg += cr.error;
+                    msg += "\n\n游戏内仍可能残留指向已分配内存的跳转。";
+                    msg += "\n建议关闭并重启游戏后再切换版本。";
+                    MsgBox("清理失败", msg, MB_ICONERROR);
                 }
             }
             app.cfg.SetCurrent(mid);
@@ -4606,7 +4668,7 @@ static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 
 bool CreateDeviceD3D(HWND hWnd);
 void CleanupDeviceD3D();
-void CreateRenderTarget();
+bool CreateRenderTarget();
 void CleanupRenderTarget();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -4641,8 +4703,7 @@ bool CreateDeviceD3D(HWND hWnd) {
             &g_pd3dDeviceContext);
     if (res != S_OK) return false;
 
-    CreateRenderTarget();
-    return true;
+    return CreateRenderTarget();  // 计划 P2(#14): RTV 建不起来就算初始化失败
 }
 
 void CleanupDeviceD3D() {
@@ -4661,11 +4722,24 @@ void CleanupDeviceD3D() {
     }
 }
 
-void CreateRenderTarget() {
-    ID3D11Texture2D* pBackBuffer;
-    g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
-    g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
+// 计划 P2(#14): 返回 bool + 逐步检查 HRESULT; 失败时 g_mainRenderTargetView 保持 nullptr,
+// 调用方据此跳过本帧渲染(而不是拿无效 RTV 去 OMSetRenderTargets)。
+bool CreateRenderTarget() {
+    if (!g_pSwapChain || !g_pd3dDevice) return false;
+    CleanupRenderTarget();  // 重建前先释放旧的, 避免失败时残留失效 RTV
+    ID3D11Texture2D* pBackBuffer = nullptr;
+    HRESULT hr = g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
+    if (FAILED(hr) || !pBackBuffer) {
+        if (pBackBuffer) pBackBuffer->Release();
+        return false;
+    }
+    hr = g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
     pBackBuffer->Release();
+    if (FAILED(hr)) {
+        g_mainRenderTargetView = nullptr;
+        return false;
+    }
+    return true;
 }
 
 void CleanupRenderTarget() {
@@ -4751,11 +4825,20 @@ int RunApp(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     WNDCLASSEXW wc = {sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance,
                       hIcon, nullptr, nullptr, nullptr, L"PoqEditorImgui", nullptr};
     wc.hIconSm = hIcon;
-    ::RegisterClassExW(&wc);
+    // 计划 P2(#15): 检查 Win32 初始化返回值(原来全部忽略, 失败会带着无效句柄往下跑)
+    if (!::RegisterClassExW(&wc)) {
+        ::MessageBoxW(nullptr, L"RegisterClassExW 失败。", L"PoqEditor", MB_ICONERROR);
+        return 1;
+    }
     HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"秦殇修改器",
                                 WS_OVERLAPPEDWINDOW, 100, 100,
                                 (int)(1100 * main_scale), (int)(720 * main_scale),
                                 nullptr, nullptr, wc.hInstance, nullptr);
+    if (!hwnd) {
+        ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        ::MessageBoxW(nullptr, L"CreateWindowW 失败。", L"PoqEditor", MB_ICONERROR);
+        return 1;
+    }
 
     if (!CreateDeviceD3D(hwnd)) {
         CleanupDeviceD3D();
@@ -4778,8 +4861,24 @@ int RunApp(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     style.ScaleAllSizes(main_scale);
     style.FontScaleDpi = main_scale;
 
-    ImGui_ImplWin32_Init(hwnd);
-    ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+    // 计划 P2(#15): backend 初始化失败要逆序清理已成功的阶段, 而不是继续跑一个半残的渲染循环
+    if (!ImGui_ImplWin32_Init(hwnd)) {
+        ImGui::DestroyContext();
+        CleanupDeviceD3D();
+        ::DestroyWindow(hwnd);
+        ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        ::MessageBoxW(nullptr, L"ImGui Win32 backend 初始化失败。", L"PoqEditor", MB_ICONERROR);
+        return 1;
+    }
+    if (!ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext)) {
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        CleanupDeviceD3D();
+        ::DestroyWindow(hwnd);
+        ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        ::MessageBoxW(nullptr, L"ImGui DX11 backend 初始化失败。", L"PoqEditor", MB_ICONERROR);
+        return 1;
+    }
 
     // 中文字体(regular + bold)
     ImFont* font_cn = LoadChineseFont(main_scale, false);
@@ -4820,9 +4919,13 @@ int RunApp(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
         if (g_ResizeWidth != 0 && g_ResizeHeight != 0) {
             CleanupRenderTarget();
-            g_pSwapChain->ResizeBuffers(0, g_ResizeWidth, g_ResizeHeight, DXGI_FORMAT_UNKNOWN, 0);
+            HRESULT rs = g_pSwapChain->ResizeBuffers(0, g_ResizeWidth, g_ResizeHeight,
+                                                     DXGI_FORMAT_UNKNOWN, 0);
             g_ResizeWidth = g_ResizeHeight = 0;
-            CreateRenderTarget();
+            if (FAILED(rs) || !CreateRenderTarget()) {
+                // 重建失败: 本帧不渲染(渲染循环会检查 g_mainRenderTargetView)
+                continue;
+            }
         }
 
         ImGui_ImplDX11_NewFrame();
@@ -4842,8 +4945,9 @@ int RunApp(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         PollExitAsk();      // 收到关闭请求且本次生成过备份: 弹"是否清理备份"询问
         RenderMsgQueue();
 
-        // 渲染
+        // 渲染(RTV 不可用时跳过本帧: 计划 P2 #14 —— 拿 nullptr 当 RTV 会直接崩)
         ImGui::Render();
+        if (!g_mainRenderTargetView) continue;
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView,
                                                    (const float*)&clear_color);
@@ -4853,10 +4957,13 @@ int RunApp(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         g_SwapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
     }
 
-    // 关闭:还原自注入的字节并释放进程句柄
-    try {
-        app.modder.Close();
-    } catch (...) {
+    // 关闭:还原自注入的字节并释放进程句柄。
+    // 退出路径不能抛异常弹窗, 失败只落到日志(计划 P0 的不变量已在 Close() 内保证)。
+    {
+        auto cr = app.modder.CloseNoThrowResult();
+        if (!cr.hook_restored || !cr.cave_freed) {
+            ::OutputDebugStringA(("PoqEditor: 退出时注入清理失败: " + cr.error).c_str());
+        }
     }
 
     ImGui_ImplDX11_Shutdown();

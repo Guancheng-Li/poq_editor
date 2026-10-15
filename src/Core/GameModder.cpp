@@ -108,7 +108,19 @@ std::vector<uint32_t> Utf8ToCodepoints(const std::string& s) {
 // ============================================================================
 
 uintptr_t GameModder::Initialize(unsigned int pid) {
-    if (pid_ != pid) ResetState();
+    // 计划 P1(#5): 换进程前必须真正清理旧进程(还原 hook + 释放远程内存),
+    // 不能只 ResetState —— 那会把旧进程里仍生效的远程修改遗留成 hook 残留。
+    if (pid_ != 0 && pid_ != pid && mem_.IsOpen()) {
+        auto cr = Close();
+        if (!cr.hook_restored || !cr.cave_freed) {
+            throw std::runtime_error(
+                "切换进程失败：旧进程(" + std::to_string(pid_) +
+                ") 的注入未能完全还原：" + cr.error +
+                "。为避免残留 hook 跳向已释放内存，已中止切换；请关闭并重启游戏后重试。");
+        }
+    } else if (pid_ != pid) {
+        ResetState();
+    }
     if (!mem_.Open(pid, ProcessMemory::kProcessAllAccess))
         throw std::runtime_error("OpenProcess 失败(请以管理员身份运行;若游戏刚重启请先刷新进程)");
     pid_ = pid;
@@ -170,7 +182,7 @@ void GameModder::EnsureInjection() {
                     if (cave[i] == 0x8B && cave[i + 1] == 0x44 && cave[i + 2] == 0x86 &&
                         cave[i + 4] == 0x5E) {
                         std::vector<unsigned char> o = {0x8B, 0x44, 0x86, cave[i + 3], 0x5E};
-                        mem_.Write(hook_addr_, o);
+                        mem_.WriteCode(hook_addr_, o);
                         orig_bytes_ = o;
                         Inject();
                         return;
@@ -202,6 +214,34 @@ bool GameModder::IsHookOriginal(const std::vector<unsigned char>& orig) {
 }
 
 void GameModder::Inject() {
+    // 计划 P1(#6): 两阶段提交 + rollback。
+    //   prepare(分配 cave / 初始化 slot / 写 cave) 失败 -> 只释放 cave, hook 未被动过;
+    //   commit(patch hook) 失败 -> 先把 hook 写回原字节, 验证成功后才释放 cave。
+    // 不变量与 Close() 一致: 只要 hook 还指向 cave, cave 就不能释放。
+    bool committed = false;
+    struct Rollback {
+        GameModder* self;
+        bool* committed;
+        ~Rollback() {
+            if (*committed) return;          // 没到 commit 或 commit 后已处理, 无需回滚
+            try {
+                if (!self->orig_bytes_.empty() && self->hook_addr_) {
+                    self->mem_.WriteCode(self->hook_addr_, self->orig_bytes_);
+                    auto back = self->mem_.Read(self->hook_addr_,
+                                                static_cast<int>(self->orig_bytes_.size()));
+                    if (back == self->orig_bytes_) self->orig_bytes_.clear();  // 已还原
+                }
+            } catch (...) {
+            }
+            try {
+                if (self->alloc_base_) self->mem_.Free(self->alloc_base_);
+            } catch (...) {
+            }
+            self->alloc_base_ = 0;
+            self->cur_item_addr_ = 0;
+        }
+    } rollback{this, &committed};
+
     uint8_t disp = orig_bytes_[3];  // 原指令的位移字节(1E/30 等)
     const uint32_t alloc_size = 0x100;
     alloc_base_ = mem_.Alloc(alloc_size, hook_addr_);
@@ -238,12 +278,14 @@ void GameModder::Inject() {
     }
     auto cave = BuildCave(cur_item_addr_, cave_addr, return_addr, disp, cap, freeze_addr_,
                           bag_flag_addr, hk.flag_value, flag_last_addr_, flag_arm_addr_);
-    mem_.Write(cave_addr, cave);
+    mem_.WriteCode(cave_addr, cave);
     uint32_t jmp_rel = static_cast<uint32_t>(cave_addr - return_addr);
     std::vector<unsigned char> jmp;
     jmp.push_back(0xE9);
     AppendLe32(jmp, jmp_rel);
-    mem_.Write(hook_addr_, jmp);
+    // 最后一步才改执行流; 写完 flush, 保证目标 CPU 不会执行旧指令缓存
+    mem_.WriteCode(hook_addr_, jmp);
+    committed = true;  // 执行流已改: 后续异常必须先还原 hook 再释放 cave
 }
 
 void GameModder::SetCaptureFrozen(bool on) {
@@ -457,25 +499,125 @@ bool GameModder::IsHookInjected(unsigned int pid) {
     }
 }
 
-void GameModder::Close() {
-    // 若是本工具自注入,则还原原始字节并释放 cave;复用外部注入则不还原。
-    if (mem_.IsOpen() && hook_addr_ && !orig_bytes_.empty()) {
+GameModder::CloseResult GameModder::Close() {
+    // P0 不变量: 只要 hook 仍指向 cave, cave 就绝不能释放 —— 否则游戏执行到 hook 点
+    // 会跳进已释放内存 -> 崩游戏。所以"还原 + 读回校验"必须先成功。
+    CloseResult r;
+    last_close_error_.clear();
+    last_close_failed_ = false;
+
+    const bool self_injected = mem_.IsOpen() && hook_addr_ && !orig_bytes_.empty();
+    if (self_injected) {
+        // 1) 还原原始指令
+        bool restored = false;
+        std::string why;
         try {
-            mem_.Write(hook_addr_, orig_bytes_);
-        } catch (...) {
+            // 还原的是可执行代码 -> 走 WriteCode 顺带 flush 指令缓存
+            mem_.WriteCode(hook_addr_, orig_bytes_);
+            restored = true;
+        } catch (const std::exception& ex) {
+            why = std::string("hook 还原写入失败: ") + ex.what();
         }
+        // 2) 读回校验(写成功不等于落到目标进程)
+        if (restored) {
+            try {
+                auto back = mem_.Read(hook_addr_, static_cast<int>(orig_bytes_.size()));
+                if (back != orig_bytes_) {
+                    restored = false;
+                    why = "hook 还原后校验不一致(目标进程仍指向 cave)";
+                }
+            } catch (const std::exception& ex) {
+                restored = false;
+                why = std::string("hook 还原校验读取失败: ") + ex.what();
+            }
+        }
+        r.hook_restored = restored;
+        if (!restored) {
+            // 3) 还原失败: 保留 cave 与恢复所需状态, 绝不释放
+            r.cave_freed = false;
+            r.error = why;
+            last_close_error_ = why;
+            last_close_failed_ = true;
+            std::string extra;
+            try {
+                if (pool_base_) {
+                    mem_.Free(pool_base_);
+                    r.pool_freed = true;
+                }
+            } catch (const std::exception& ex) {
+                r.pool_freed = false;
+                extra = std::string("; 节点池释放失败: ") + ex.what();
+            }
+            r.error += extra;
+            // 清本地注入状态(地址/原始字节), 但**不**释放 cave;
+            // 残留的 E9 无法再还原, 只能提示用户重启游戏。
+            hook_addr_ = 0;
+            cur_item_addr_ = 0;
+            alloc_base_ = 0;
+            pool_base_ = 0;
+            pool_size_ = 0;
+            orig_bytes_.clear();
+            mem_.Close();
+            return r;
+        }
+        // 4) 还原成功 -> 可以安全释放 cave
         try {
-            if (alloc_base_) mem_.Free(alloc_base_);
-        } catch (...) {
+            if (alloc_base_) {
+                mem_.Free(alloc_base_);
+                r.cave_freed = true;
+            }
+        } catch (const std::exception& ex) {
+            r.cave_freed = false;
+            r.error = std::string("cave 释放失败: ") + ex.what();
+            last_close_error_ = r.error;
+            last_close_failed_ = true;
         }
     }
-    // 释放动态节点池(steam/v1.30 用,需在句柄关闭前)
+
+    // 动态节点池(steam/v1.30 用, 需在句柄关闭前)
     try {
-        if (pool_base_) mem_.Free(pool_base_);
-    } catch (...) {
+        if (pool_base_) {
+            mem_.Free(pool_base_);
+            r.pool_freed = true;
+        }
+    } catch (const std::exception& ex) {
+        r.pool_freed = false;
+        if (!r.error.empty()) r.error += "; ";
+        r.error += std::string("节点池释放失败: ") + ex.what();
+        last_close_error_ = r.error;
+        last_close_failed_ = true;
     }
     ResetState();
     mem_.Close();
+    return r;
+}
+
+void GameModder::CloseNoThrow() {
+    CloseNoThrowResult();
+}
+
+GameModder::CloseResult GameModder::CloseNoThrowResult() {
+    try {
+        return Close();
+    } catch (const std::exception& ex) {
+        CloseResult r;
+        r.hook_restored = false;
+        r.cave_freed = false;
+        r.pool_freed = false;
+        r.error = std::string("关闭时发生异常: ") + ex.what();
+        last_close_error_ = r.error;
+        last_close_failed_ = true;
+        return r;
+    } catch (...) {
+        CloseResult r;
+        r.hook_restored = false;
+        r.cave_freed = false;
+        r.pool_freed = false;
+        r.error = "关闭时发生未知异常";
+        last_close_error_ = r.error;
+        last_close_failed_ = true;
+        return r;
+    }
 }
 
 // ============================================================================
@@ -562,14 +704,24 @@ void GameModder::WriteStringField(uintptr_t item_base, const BasicFieldCfg& f,
     try {
         uintptr_t ptr = mem_.ReadUInt32(item_base + f.offset);
         if (ptr == 0 || ptr == 0xFFFFFFFF) return;
+        // 计划 P1/P2(#10): 旧实现无条件写最多 101 字节, 而"上限 100"并不代表目标 buffer
+        // 真有 100 字节容量 —— 若旧字符串只分配了很小空间, 会覆盖相邻堆对象。
+        // 保守策略: 不超过"当前字符串实际长度"(装得下才写), 也不超过 100 字节硬上限。
+        // 代价: 比现字符串更长的新名字会被截断, 但不会破坏堆。
+        const size_t kMaxStringBytes = 100;  // 50 个汉字
+        size_t curLen = 0;
+        try {
+            auto opt = mem_.ReadStringGbk(ptr, kMaxStringBytes + 1, f.codepage);
+            curLen = opt ? opt->size() : 0;
+        } catch (...) {
+            curLen = 0;  // 读不到就按最小容量处理
+        }
+        const size_t kLimit = std::min(curLen, kMaxStringBytes);
         std::string data;
-        int count = 0;
         for (uint32_t cp : Utf8ToCodepoints(text)) {
-            if (count >= 50) break;
             std::string chb = GbkEncodeOne(cp);
-            if (data.size() + chb.size() > 100) break;
+            if (data.size() + chb.size() > kLimit) break;
             data += chb;
-            ++count;
         }
         data.push_back('\0');
         mem_.Write(ptr, std::vector<unsigned char>(data.begin(), data.end()));
@@ -824,10 +976,12 @@ std::pair<int, int> GameModder::WriteAttributes(uintptr_t item_base,
         //   node_flag(0x10) 由 WriteNode 按 p.active 写入,勿在此强制为 1。
         mem_.WriteUInt32(addr + cfg.prev_offset, 0);
         mem_.WriteUInt32(addr + cfg.sentinel_offset, 0xFFFFFFFF);
+        // 目标进程是 32 位, 指针按低 32 位存入(显式截断, 避免 C4244 隐式窄化告警)
+        const auto addr32 = static_cast<unsigned int>(addr);
         if (tail) {
-            mem_.WriteUInt32(tail + cfg.next_offset, addr);
+            mem_.WriteUInt32(tail + cfg.next_offset, addr32);
         } else {
-            mem_.WriteUInt32(item_base + cfg.head_offset, addr);
+            mem_.WriteUInt32(item_base + cfg.head_offset, addr32);
         }
         tail = addr;
         ++added;
