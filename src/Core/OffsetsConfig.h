@@ -31,15 +31,15 @@ struct CaptureCfg {
 /// AOB 注入目标与捕获条件(对应 Python 的 HookCfg)。
 struct HookCfg {
     std::string module = "EasyRPG116.dll";
-    uint32_t offset = 0x1D0D;               // 注入偏移
-    std::string aob = "8B 44 86 1E 5E";     // 参考原指令字节(现按模式 8B 44 86 ?? 5E 识别)
-    uint32_t weight_offset = 0xF8;          // 兼容旧配置:未写 capture 时的重量字段偏移
-    uint32_t weight_max = 1000;             // 兼容旧配置:重量上限
-    std::optional<CaptureCfg> capture;      // 捕获条件;未设置视为 weight 类型(用 weight_* 兜底)
+    uint32_t offset = 0x1D0D;            // 注入偏移
+    std::string aob = "8B 44 86 1E 5E";  // 参考原指令字节(现按模式 8B 44 86 ?? 5E 识别)
+    uint32_t weight_offset = 0xF8;       // 兼容旧配置:未写 capture 时的重量字段偏移
+    uint32_t weight_max = 1000;          // 兼容旧配置:重量上限
+    std::optional<CaptureCfg> capture;   // 捕获条件;未设置视为 weight 类型(用 weight_* 兜底)
     // 背包拿起门:仅当 [flag_module+flag_offset] == flag_value 时才捕获。
     // steam 实测 POQ.exe+0x261F84:0=未从背包拿物品(悬停/地上捡),1=正从背包拿起(手持)。
     // 用于区分"真正选取"与"悬停"——悬停/场景读取时 flag=0 直接跳过,钩子不再被污染。
-    std::string flag_module;                // 空 = 不启用该门
+    std::string flag_module;  // 空 = 不启用该门
     uint32_t flag_offset = 0;
     uint32_t flag_value = 1;
 };
@@ -66,13 +66,13 @@ struct BasicFieldCfg {
     std::optional<int> min;
     std::optional<int> max;
     bool readonly = false;
-    std::map<int, std::string> enum_map;         // 值 -> 显示名(enum 类型)
-    bool enum_display_value = false;             // enum 下拉框是否显示 "值：名字"
-    std::optional<ConditionalCfg> conditional;   // 仅当引用字段值在 values 中才可编辑/写入
-    std::optional<std::string> max_ref;          // 实际上限取自另一字段(如耐久度<=耐久度上限)
-    std::optional<std::string> hint;             // 界面提示
-    int codepage = 936;                          // string_ptr 的代码页(0=CP_ACP)
-    std::optional<ForceWhenCfg> force_when;      // 引用字段值在 values 中时强制为 value
+    std::map<int, std::string> enum_map;        // 值 -> 显示名(enum 类型)
+    bool enum_display_value = false;            // enum 下拉框是否显示 "值：名字"
+    std::optional<ConditionalCfg> conditional;  // 仅当引用字段值在 values 中才可编辑/写入
+    std::optional<std::string> max_ref;         // 实际上限取自另一字段(如耐久度<=耐久度上限)
+    std::optional<std::string> hint;            // 界面提示
+    int codepage = 936;                         // string_ptr 的代码页(0=CP_ACP)
+    std::optional<ForceWhenCfg> force_when;     // 引用字段值在 values 中时强制为 value
 
     /// 该字段当前是否被 force_when 强制(引用字段值在 values 中)。
     bool IsForced(const std::optional<int>& type_val) const;
@@ -82,18 +82,18 @@ struct BasicFieldCfg {
 
 /// 属性链表内存布局(对应 Python 的 AttrListCfg)。
 struct AttrListCfg {
-    uint32_t head_offset = 0x45C;        // 头指针位于 物品基址 + head_offset
+    uint32_t head_offset = 0x45C;  // 头指针位于 物品基址 + head_offset
     uint32_t next_offset = 0x00;
-    uint32_t prev_offset = 0x04;         // 前驱指针(原生链表 prev 全 0,新增节点也写 0)
-    uint32_t sentinel_offset = 0x08;     // 有效节点哨兵(=0xFFFFFFFF)
-    uint32_t node_flag_offset = 0x10;    // 启用颜色标志(=1)
+    uint32_t prev_offset = 0x04;       // 前驱指针(原生链表 prev 全 0,新增节点也写 0)
+    uint32_t sentinel_offset = 0x08;   // 有效节点哨兵(=0xFFFFFFFF)
+    uint32_t node_flag_offset = 0x10;  // 启用颜色标志(=1)
     uint32_t id_offset = 0x0C;
     uint32_t color_offset = 0x14;
     uint32_t precent_offset = 0x1C;
     uint32_t value_offset = 0x20;
     // 新增节点槽:编辑器自管理的节点池(VirtualAllocEx,游戏不认识、不会 free)。
     // 槽位间隔 slot_size 对齐真实节点大小(web.ct 模板实证 0x40 一个)。
-    uint32_t slot_size = 0x40;           // 每个槽位间隔字节
+    uint32_t slot_size = 0x40;  // 每个槽位间隔字节
 };
 
 /// 一种版本下的全部偏移(对应 Python 的 ModeCfg)。

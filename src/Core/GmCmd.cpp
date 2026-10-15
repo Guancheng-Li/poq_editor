@@ -12,6 +12,7 @@
 
 #include "Core/GmCmd.h"
 
+#include <windows.h>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -27,7 +28,6 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
-#include <windows.h>
 
 namespace poq {
 namespace gm_cmd {
@@ -143,6 +143,26 @@ std::wstring Utf8ToWide(const std::string& s) {
     return out;
 }
 
+// 计划 260929 #16: 远程缓冲 RAII —— 出作用域(含异常路径)自动释放, 免得每次
+// throw 前手工 mem.Free。超时路径必须 Dismiss(): 线程可能仍在执行 stub, 释放
+// 会让它跳进已释放内存。
+struct RemoteBufGuard {
+    ProcessMemory* mem = nullptr;
+    uintptr_t addr = 0;
+    RemoteBufGuard(ProcessMemory& m, uintptr_t a) : mem(&m), addr(a) {}
+    ~RemoteBufGuard() {
+        if (addr) {
+            try {
+                mem->Free(addr);
+            } catch (...) {
+            }
+        }
+    }
+    RemoteBufGuard(const RemoteBufGuard&) = delete;
+    RemoteBufGuard& operator=(const RemoteBufGuard&) = delete;
+    void Dismiss() { addr = 0; }
+};
+
 void AppendLe32(std::vector<unsigned char>& v, uint32_t x) {
     v.push_back(static_cast<unsigned char>(x & 0xFF));
     v.push_back(static_cast<unsigned char>((x >> 8) & 0xFF));
@@ -178,8 +198,8 @@ std::vector<unsigned char> ToBytes(const std::string& s) {
 // 在 data 里从 off 起找 kw(字节序列),返回位置或 npos。
 size_t FindBytes(const std::vector<unsigned char>& data, const std::string& kw, size_t off) {
     if (kw.empty() || off >= data.size()) return std::string::npos;
-    auto it = std::search(data.begin() + static_cast<std::ptrdiff_t>(off), data.end(),
-                          kw.begin(), kw.end());
+    auto it = std::search(data.begin() + static_cast<std::ptrdiff_t>(off), data.end(), kw.begin(),
+                          kw.end());
     if (it == data.end()) return std::string::npos;
     return static_cast<size_t>(it - data.begin());
 }
@@ -311,6 +331,8 @@ DispatchResult DispatchDirect(Ctx& ctx, const std::string& token, const std::str
             throw std::runtime_error("VirtualAllocEx 失败");
         }
     }
+    // 计划 260929 #16: 分配即接管, 之后任何 throw 都由 guard 自动释放。
+    RemoteBufGuard base_guard(mem, base);
     try {
         // 计划 P1(#9): 远程缓冲是固定布局, 必须按 GBK 编码后校验边界 ——
         // UTF-8 长度 != GBK 长度, 只靠 UI 输入框长度挡不住越界(会覆盖 stub/ret_slot)。
@@ -322,12 +344,10 @@ DispatchResult DispatchDirect(Ctx& ctx, const std::string& token, const std::str
         std::string r = Utf8ToGbk(rest);
         r.push_back('\0');
         if (t.size() > kRestOff - kTokenOff) {
-            mem.Free(base);
             throw std::runtime_error("GM 命令 token 过长: GBK " + std::to_string(t.size()) +
                                      " 字节, 上限 " + std::to_string(kRestOff - kTokenOff - 1));
         }
         if (r.size() > kStubOff - kRestOff) {
-            mem.Free(base);
             throw std::runtime_error("GM 命令参数过长: GBK " + std::to_string(r.size()) +
                                      " 字节, 上限 " + std::to_string(kStubOff - kRestOff - 1));
         }
@@ -343,8 +363,8 @@ DispatchResult DispatchDirect(Ctx& ctx, const std::string& token, const std::str
         AppendLe32(code, static_cast<uint32_t>(base + 0x40));
         code.push_back(0x68);
         AppendLe32(code, static_cast<uint32_t>(base));
-        int32_t rel = static_cast<int32_t>((ctx.rpg + ctx.ver->dispatch) -
-                                           (stub + code.size() + 5));
+        int32_t rel =
+            static_cast<int32_t>((ctx.rpg + ctx.ver->dispatch) - (stub + code.size() + 5));
         code.push_back(0xE8);
         AppendLe32(code, static_cast<uint32_t>(rel));
         code.push_back(0x83);
@@ -372,21 +392,12 @@ DispatchResult DispatchDirect(Ctx& ctx, const std::string& token, const std::str
             res.value = signextend ? static_cast<int64_t>(static_cast<int32_t>(u))
                                    : static_cast<int64_t>(u);
         }
-        // 正常/失败但线程已结束: 释放远程内存(对齐 python 每次 VirtualFreeEx)。
+        // 正常/失败但线程已结束: guard 析构释放远程内存(对齐 python 每次 VirtualFreeEx)。
         // 超时强杀时**不释放** —— 线程可能仍在执行 stub 里的代码, 释放会让它跳进已释放内存。
-        if (!res.timed_out) {
-            try {
-                mem.Free(base);
-            } catch (...) {
-            }
-        }
+        if (res.timed_out) base_guard.Dismiss();
         return res;
     } catch (...) {
-        try {
-            mem.Free(base);
-        } catch (...) {
-        }
-        throw;
+        throw;  // base_guard 析构统一释放
     }
 }
 
@@ -661,8 +672,7 @@ std::vector<std::pair<uintptr_t, std::string>> Gather130Lines(ProcessMemory& mem
             size_t seg_len = j - i;
             if (seg_len >= 3) {
                 std::string t = GbkToUtf8(reinterpret_cast<const char*>(data.data()) + i, seg_len);
-                if (t.size() >= 2 && t.size() <= 150)
-                    out.push_back({r.base + i, t});
+                if (t.size() >= 2 && t.size() <= 150) out.push_back({r.base + i, t});
             }
             i = j + 1;
         }
@@ -696,8 +706,7 @@ std::optional<std::string> Capture130Text(Ctx& ctx, bool want_objs, double timeo
         int objcount = 0;
         bool have_count = false;
         for (const auto& [a, t] : lines) {
-            if (std::llabs(static_cast<long long>(a) - static_cast<long long>(head_addr)) >=
-                0x8000)
+            if (std::llabs(static_cast<long long>(a) - static_cast<long long>(head_addr)) >= 0x8000)
                 continue;
             Class130 c = Classify130(t);
             if (c.kind == "scene") {
@@ -764,8 +773,8 @@ std::string CaptureObjList(Ctx& ctx) {
     if (entries.empty()) return "";
     std::string out = "物体个数 : " + std::to_string(entries.size());
     for (const auto& kv : entries)
-        out += "\n\t" + kv.second.name + "(" + kv.second.alias + ") : " + kv.second.path +
-               "(" + std::to_string(kv.second.id) + ")";
+        out += "\n\t" + kv.second.name + "(" + kv.second.alias + ") : " + kv.second.path + "(" +
+               std::to_string(kv.second.id) + ")";
     return out;
 }
 
@@ -796,13 +805,13 @@ std::string CaptureSteamText(Ctx& ctx, bool is_look) {
 // ============================================================================
 const GmVersion& SteamVersion() {
     static const GmVersion v{"EasyRPG.dll", 0x478D38, 0x478D34, 0x4797FC, 0x3B5334, 0xEC,
-                             0x5409F8,      0x5491B8, 0x6AF60, 0x566B0, 0x28,     true};
+                             0x5409F8,      0x5491B8, 0x6AF60,  0x566B0,  0x28,     true};
     return v;
 }
 
 const GmVersion& V130Version() {
-    static const GmVersion v{"EasyRPG116.dll", 0x3B45D0, 0x3B45CC, 0x37459C, 0x2F773C, 0x1C4,
-                             0,                0,        0x6530,   0x3CDC0,  0x28,     false};
+    static const GmVersion v{"EasyRPG116.dll", 0x3B45D0, 0x3B45CC, 0x37459C, 0x2F773C, 0x1C4, 0, 0,
+                             0x6530,           0x3CDC0,  0x28,     false};
     return v;
 }
 
@@ -819,8 +828,7 @@ std::string Activate(Ctx& ctx, Method method) {
         // _do_activate:先 fix_wizard_lst(verbose),再 activate_gm_by_cmd)。
         FixWizardLst(ctx, true, log);
         DispatchResult res = DispatchDirect(ctx, "r", "9", 3000, false);
-        if (res.process_gone)
-            throw std::runtime_error("游戏进程已退出 (命令可能崩了游戏)");
+        if (res.process_gone) throw std::runtime_error("游戏进程已退出 (命令可能崩了游戏)");
         if (res.timed_out) log += "[!!] 远程线程超时未返回\n";
     } else {
         // 方案A:内存直写权限字段 + 静默建立 wizard.lst(对齐 cmd_enable)
@@ -830,8 +838,9 @@ std::string Activate(Ctx& ctx, Method method) {
             ctx.mem.WriteUInt32(ctx.exe + ctx.ver->wizard,
                                 static_cast<uint32_t>(ctx.rpg + ctx.ver->user0));
         if (ctx.ver->console) ctx.mem.WriteUInt32(ctx.exe + ctx.ver->console, 1);
-        log += "[enable] 等级=" + std::to_string(GetLevel(ctx)) + " rights=" +
-               std::to_string(ReadRights(ctx)) + " " + (ok1 ? "OK" : "(玩家对象未就绪)") + "\n";
+        log += "[enable] 等级=" + std::to_string(GetLevel(ctx)) +
+               " rights=" + std::to_string(ReadRights(ctx)) + " " +
+               (ok1 ? "OK" : "(玩家对象未就绪)") + "\n";
         if (!ok1) log += "  [!!] 玩家对象指针未定位 (游戏可能未进入主界面)\n";
         FixWizardLst(ctx, true, log);
     }
@@ -860,8 +869,7 @@ std::string Send(Ctx& ctx, const std::string& text) {
                       (ctx.ver->is_steam ? "steam" : "130") + ")\n";
     DispatchResult res = SendCommand(ctx, token, rest);
     if (res.process_gone) {
-        if (!IsProcessAlive(ctx.pid))
-            throw std::runtime_error("游戏进程已退出 (命令可能崩了游戏)");
+        if (!IsProcessAlive(ctx.pid)) throw std::runtime_error("游戏进程已退出 (命令可能崩了游戏)");
         log += "=> 返回 -1 (未找到命令或被拒. 1.30: clear/r 等控制台命令不在 GM 表)\n";
         return log;
     }
@@ -869,8 +877,8 @@ std::string Send(Ctx& ctx, const std::string& text) {
         log += "[!!] 远程线程超时未返回 - 命令可能挂住, 游戏可能不稳定\n";
         return log;
     }
-    log += "=> 返回 " + std::to_string(res.value) + " (" +
-           (res.value ? "成功" : "失败/被拒") + ")\n";
+    log +=
+        "=> 返回 " + std::to_string(res.value) + " (" + (res.value ? "成功" : "失败/被拒") + ")\n";
     return log;
 }
 

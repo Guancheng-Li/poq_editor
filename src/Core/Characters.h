@@ -47,7 +47,7 @@ struct CharFieldCfg {
     std::optional<int> min;
     std::optional<int> max;
     std::optional<std::string> hint;
-    bool writable = true;      // 固有写权限: false = 后端也拒绝写(UI 禁用只是表现)
+    bool writable = true;  // 固有写权限: false = 后端也拒绝写(UI 禁用只是表现)
 };
 
 // 全部可选队友白名单(名字 -> 职业显示名,共 16 人;定位时槽内名字必须命中)。
@@ -71,8 +71,8 @@ const std::map<std::string, std::map<std::string, uint32_t>>& MemberOffsets();
 // 等级 1-99、生命/精气合理)。返回 [(姓名, 结构体地址), ...] 按槽位顺序,
 // 结构体 = EDI + 0x28。用 vector 而非 map 以保留槽位顺序(对齐 Python dict)。
 std::vector<std::pair<std::string, uintptr_t>> LocateByOffsets(ProcessMemory& mem, unsigned int pid,
-                                                  const std::string& module,
-                                                  bool strict_filter = true);
+                                                               const std::string& module,
+                                                               bool strict_filter = true);
 
 // 调试辅助:不放过滤地按槽位顺序读每个槽的名字(读失败记为占位符)。
 // 用于 F12 调试验证"哪个槽扫不出来、哪个名字被白名单挡掉"(带 ⚠ 标记)。

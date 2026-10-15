@@ -20,8 +20,7 @@ public:
         SkipWs();
         Value v = ParseValue();
         SkipWs();
-        if (pos_ != s_.size())
-            Fail("JSON 末尾有多余内容");
+        if (pos_ != s_.size()) Fail("JSON 末尾有多余内容");
         return v;
     }
 
@@ -34,8 +33,8 @@ private:
     }
 
     void SkipWs() {
-        while (pos_ < s_.size() && (s_[pos_] == ' ' || s_[pos_] == '\t' ||
-                                    s_[pos_] == '\r' || s_[pos_] == '\n'))
+        while (pos_ < s_.size() &&
+               (s_[pos_] == ' ' || s_[pos_] == '\t' || s_[pos_] == '\r' || s_[pos_] == '\n'))
             ++pos_;
     }
 
@@ -44,12 +43,21 @@ private:
     Value ParseValue() {
         char c = Peek();
         switch (c) {
-            case '{': return ParseObject();
-            case '[': return ParseArray();
-            case '"': return ParseString();
-            case 't': Expect("true"); return Value::MakeBool(true);
-            case 'f': Expect("false"); return Value::MakeBool(false);
-            case 'n': Expect("null"); return Value::MakeNull();
+            case '{':
+                return ParseObject();
+            case '[':
+                return ParseArray();
+            case '"':
+                return ParseString();
+            case 't':
+                Expect("true");
+                return Value::MakeBool(true);
+            case 'f':
+                Expect("false");
+                return Value::MakeBool(false);
+            case 'n':
+                Expect("null");
+                return Value::MakeNull();
             default:
                 if (c == '-' || (c >= '0' && c <= '9')) return ParseNumber();
                 Fail(std::string("意外的字符 '") + c + "'");
@@ -58,8 +66,7 @@ private:
 
     void Expect(const char* word) {
         for (const char* p = word; *p; ++p) {
-            if (pos_ >= s_.size() || s_[pos_] != *p)
-                Fail(std::string("期望 ") + word);
+            if (pos_ >= s_.size() || s_[pos_] != *p) Fail(std::string("期望 ") + word);
             ++pos_;
         }
     }
@@ -136,16 +143,35 @@ private:
                 if (pos_ >= s_.size()) Fail("转义序列未闭合");
                 char e = s_[pos_++];
                 switch (e) {
-                    case '"': out.push_back('"'); break;
-                    case '\\': out.push_back('\\'); break;
-                    case '/': out.push_back('/'); break;
-                    case 'b': out.push_back('\b'); break;
-                    case 'f': out.push_back('\f'); break;
-                    case 'n': out.push_back('\n'); break;
-                    case 'r': out.push_back('\r'); break;
-                    case 't': out.push_back('\t'); break;
-                    case 'u': out += ParseUnicodeEscape(); break;
-                    default: Fail("未知转义 '\\" + std::string(1, e) + "'");
+                    case '"':
+                        out.push_back('"');
+                        break;
+                    case '\\':
+                        out.push_back('\\');
+                        break;
+                    case '/':
+                        out.push_back('/');
+                        break;
+                    case 'b':
+                        out.push_back('\b');
+                        break;
+                    case 'f':
+                        out.push_back('\f');
+                        break;
+                    case 'n':
+                        out.push_back('\n');
+                        break;
+                    case 'r':
+                        out.push_back('\r');
+                        break;
+                    case 't':
+                        out.push_back('\t');
+                        break;
+                    case 'u':
+                        out += ParseUnicodeEscape();
+                        break;
+                    default:
+                        Fail("未知转义 '\\" + std::string(1, e) + "'");
                 }
                 continue;
             }
@@ -184,10 +210,14 @@ private:
         for (int i = 0; i < 4; ++i) {
             char c = s_[pos_++];
             v <<= 4;
-            if (c >= '0' && c <= '9') v |= static_cast<uint32_t>(c - '0');
-            else if (c >= 'a' && c <= 'f') v |= static_cast<uint32_t>(c - 'a' + 10);
-            else if (c >= 'A' && c <= 'F') v |= static_cast<uint32_t>(c - 'A' + 10);
-            else Fail("\\u 含非十六进制字符");
+            if (c >= '0' && c <= '9')
+                v |= static_cast<uint32_t>(c - '0');
+            else if (c >= 'a' && c <= 'f')
+                v |= static_cast<uint32_t>(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F')
+                v |= static_cast<uint32_t>(c - 'A' + 10);
+            else
+                Fail("\\u 含非十六进制字符");
         }
         return v;
     }
@@ -246,13 +276,27 @@ void AppendEscaped(std::string& out, const std::string& s) {
     out.push_back('"');
     for (unsigned char c : s) {
         switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\b': out += "\\b"; break;
-            case '\f': out += "\\f"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
+            case '"':
+                out += "\\\"";
+                break;
+            case '\\':
+                out += "\\\\";
+                break;
+            case '\b':
+                out += "\\b";
+                break;
+            case '\f':
+                out += "\\f";
+                break;
+            case '\n':
+                out += "\\n";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
             default:
                 if (c < 0x20) {
                     char buf[8];
@@ -278,10 +322,18 @@ void AppendNumber(std::string& out, double d) {
 
 void WriteImpl(const Value& v, std::string& out, int depth, bool indent) {
     switch (v.type) {
-        case Value::Null: out += "null"; break;
-        case Value::Bool: out += v.boolean ? "true" : "false"; break;
-        case Value::Number: AppendNumber(out, v.number); break;
-        case Value::String: AppendEscaped(out, v.string); break;
+        case Value::Null:
+            out += "null";
+            break;
+        case Value::Bool:
+            out += v.boolean ? "true" : "false";
+            break;
+        case Value::Number:
+            AppendNumber(out, v.number);
+            break;
+        case Value::String:
+            AppendEscaped(out, v.string);
+            break;
         case Value::Array: {
             if (v.array.empty()) {
                 out += "[]";
@@ -331,7 +383,9 @@ void WriteImpl(const Value& v, std::string& out, int depth, bool indent) {
 
 }  // namespace
 
-Value Parse(const std::string& text) { return Parser(text).Run(); }
+Value Parse(const std::string& text) {
+    return Parser(text).Run();
+}
 
 std::string Write(const Value& v, bool indent) {
     std::string out;

@@ -58,11 +58,11 @@ public:
     // Close() 结果: hook 是否已还原、cave/节点池是否已释放。
     // 不变量(计划 P0): 只要 hook 仍指向 cave, cave 绝不能被释放。
     struct CloseResult {
-        bool hook_restored = true;   // hook 字节已写回并读回校验通过(非自注入时为 true)
-        bool cave_freed = true;      // code cave 已释放
-        bool pool_freed = true;      // 词条节点池已释放
-        bool process_exited = false; // 目标进程已退出(远程内存随进程释放, 无需再管)
-        std::string error;           // 失败原因(有内容表示需要提示用户)
+        bool hook_restored = true;    // hook 字节已写回并读回校验通过(非自注入时为 true)
+        bool cave_freed = true;       // code cave 已释放
+        bool pool_freed = true;       // 词条节点池已释放
+        bool process_exited = false;  // 目标进程已退出(远程内存随进程释放, 无需再管)
+        std::string error;            // 失败原因(有内容表示需要提示用户)
     };
     /// 关闭并还原注入。正常路径会抛异常报告失败(除非进程已退出);
     /// 析构/兜底请用 CloseNoThrow()。
@@ -128,19 +128,15 @@ public:
 
 private:
     void ResetState();
-    bool last_close_failed_ = false;      // 上次关闭未能完全还原
-    std::string last_close_error_;        // 上次关闭失败原因
+    bool last_close_failed_ = false;  // 上次关闭未能完全还原
+    std::string last_close_error_;    // 上次关闭失败原因
     void EnsureInjection();
     static bool IsHookOriginal(const std::vector<unsigned char>& orig);
     void Inject();
-    static std::vector<unsigned char> BuildCave(uintptr_t cur_item_addr, uintptr_t cave_addr,
-                                                uintptr_t return_addr, uint8_t disp,
-                                                const CaptureCfg& capture,
-                                                uintptr_t freeze_addr = 0,
-                                                uintptr_t bag_flag_addr = 0,
-                                                uint32_t bag_flag_value = 1,
-                                                uintptr_t flag_last_addr = 0,
-                                                uintptr_t flag_arm_addr = 0);
+    static std::vector<unsigned char> BuildCave(
+        uintptr_t cur_item_addr, uintptr_t cave_addr, uintptr_t return_addr, uint8_t disp,
+        const CaptureCfg& capture, uintptr_t freeze_addr = 0, uintptr_t bag_flag_addr = 0,
+        uint32_t bag_flag_value = 1, uintptr_t flag_last_addr = 0, uintptr_t flag_arm_addr = 0);
     uintptr_t FindCurItemSlot(uintptr_t hook_addr);
 
     // 捕获条件注册表:capture.type -> 生成"判断 + 捕获"段字节函数
@@ -172,14 +168,14 @@ private:
     ProcessMemory mem_;
     unsigned int pid_ = 0;
     uintptr_t hook_addr_ = 0;
-    uintptr_t cur_item_addr_ = 0;  // cur_item 槽地址
-    uintptr_t freeze_addr_ = 0;    // 冻结闸门地址(自注入 cave 内;0=不支持)
-    uintptr_t flag_last_addr_ = 0; // 背包拿起flag的"上次值"持久化dword(cave 边缘判断用)
-    uintptr_t flag_arm_addr_ = 0;  // 边缘后的"捕获臂"计数(0=未武装;>0=下一拍捕获一次)
-    bool bag_flag_active_ = false; // 背包拿起边缘门已启用
-    uintptr_t alloc_base_ = 0;     // 自注入分配的基址(用于释放)
-    uintptr_t pool_base_ = 0;      // 动态节点池基址
-    uint32_t pool_size_ = 0;       // 动态节点池大小
+    uintptr_t cur_item_addr_ = 0;            // cur_item 槽地址
+    uintptr_t freeze_addr_ = 0;              // 冻结闸门地址(自注入 cave 内;0=不支持)
+    uintptr_t flag_last_addr_ = 0;           // 背包拿起flag的"上次值"持久化dword(cave 边缘判断用)
+    uintptr_t flag_arm_addr_ = 0;            // 边缘后的"捕获臂"计数(0=未武装;>0=下一拍捕获一次)
+    bool bag_flag_active_ = false;           // 背包拿起边缘门已启用
+    uintptr_t alloc_base_ = 0;               // 自注入分配的基址(用于释放)
+    uintptr_t pool_base_ = 0;                // 动态节点池基址
+    uint32_t pool_size_ = 0;                 // 动态节点池大小
     std::vector<unsigned char> orig_bytes_;  // 自注入前 hook 处原始 5 字节(用于还原)
 };
 

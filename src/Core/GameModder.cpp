@@ -1,8 +1,8 @@
 #include "Core/GameModder.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 
@@ -114,8 +114,8 @@ uintptr_t GameModder::Initialize(unsigned int pid) {
         auto cr = Close();
         if (!cr.hook_restored || !cr.cave_freed) {
             throw std::runtime_error(
-                "切换进程失败：旧进程(" + std::to_string(pid_) +
-                ") 的注入未能完全还原：" + cr.error +
+                "切换进程失败：旧进程(" + std::to_string(pid_) + ") 的注入未能完全还原：" +
+                cr.error +
                 "。为避免残留 hook 跳向已释放内存，已中止切换；请关闭并重启游戏后重试。");
         }
     } else if (pid_ != pid) {
@@ -173,8 +173,8 @@ void GameModder::EnsureInjection() {
         }
         if (stale) {
             // 从旧 cave 尾部恢复原指令 8B 44 86 <disp> 5E,再注入新版
-            int32_t rel = (int32_t)(orig[1]) | ((int32_t)orig[2] << 8) |
-                          ((int32_t)orig[3] << 16) | ((int32_t)orig[4] << 24);
+            int32_t rel = (int32_t)(orig[1]) | ((int32_t)orig[2] << 8) | ((int32_t)orig[3] << 16) |
+                          ((int32_t)orig[4] << 24);
             uintptr_t cave_addr = (uintptr_t)((hook_addr_ + 5 + rel) & 0xFFFFFFFFULL);
             try {
                 auto cave = mem_.Read(cave_addr, 128);
@@ -199,11 +199,10 @@ void GameModder::EnsureInjection() {
         orig_bytes_ = orig;
         Inject();
     } else {
-        throw std::runtime_error(
-            "hook 处字节未识别:" + HexBytes(orig) +
-            "\n期望已注入(E9 jmp)或原指令模式 8B 44 86 ?? 5E"
-            "(mov eax,[esi+eax*4+disp8]; pop esi)。"
-            "游戏版本可能不同,请在偏移配置中调整 hook。");
+        throw std::runtime_error("hook 处字节未识别:" + HexBytes(orig) +
+                                 "\n期望已注入(E9 jmp)或原指令模式 8B 44 86 ?? 5E"
+                                 "(mov eax,[esi+eax*4+disp8]; pop esi)。"
+                                 "游戏版本可能不同,请在偏移配置中调整 hook。");
     }
 }
 
@@ -223,7 +222,7 @@ void GameModder::Inject() {
         GameModder* self;
         bool* committed;
         ~Rollback() {
-            if (*committed) return;          // 没到 commit 或 commit 后已处理, 无需回滚
+            if (*committed) return;  // 没到 commit 或 commit 后已处理, 无需回滚
             try {
                 if (!self->orig_bytes_.empty() && self->hook_addr_) {
                     self->mem_.WriteCode(self->hook_addr_, self->orig_bytes_);
@@ -316,15 +315,19 @@ std::vector<unsigned char> GameModder::BuildCapWeight(uintptr_t cur_item_addr,
     // nocap:
     //   pop ecx
     std::vector<unsigned char> cave;
-    cave.push_back(0x51);                                       // push ecx
-    cave.push_back(0x8B); cave.push_back(0x8E);                 // mov ecx,[esi+offset]
+    cave.push_back(0x51);  // push ecx
+    cave.push_back(0x8B);
+    cave.push_back(0x8E);  // mov ecx,[esi+offset]
     AppendLe32(cave, cap.offset);
-    cave.push_back(0x81); cave.push_back(0xF9);                 // cmp ecx, max
+    cave.push_back(0x81);
+    cave.push_back(0xF9);  // cmp ecx, max
     AppendLe32(cave, cap.max);
-    cave.push_back(0x77); cave.push_back(0x06);                 // ja +6(跳过 mov [cur_item],esi)
-    cave.push_back(0x89); cave.push_back(0x35);                 // mov [cur_item],esi
+    cave.push_back(0x77);
+    cave.push_back(0x06);  // ja +6(跳过 mov [cur_item],esi)
+    cave.push_back(0x89);
+    cave.push_back(0x35);  // mov [cur_item],esi
     AppendLe32(cave, static_cast<uint32_t>(cur_item_addr));
-    cave.push_back(0x59);                                       // pop ecx (nocap)
+    cave.push_back(0x59);  // pop ecx (nocap)
     return cave;
 }
 
@@ -342,14 +345,18 @@ std::vector<unsigned char> GameModder::BuildCapItemType(uintptr_t cur_item_addr,
     std::vector<unsigned char> conds;
     AppendCmpEsiImm(conds, cap.mark_offset, static_cast<int32_t>(cap.mark_value));
     size_t j1 = conds.size();
-    conds.push_back(0x75); conds.push_back(0x00);               // jne code
+    conds.push_back(0x75);
+    conds.push_back(0x00);  // jne code
     AppendCmpEsiImm(conds, cap.type_offset, static_cast<int32_t>(cap.type_min));
     size_t j2 = conds.size();
-    conds.push_back(0x72); conds.push_back(0x00);               // jb code
+    conds.push_back(0x72);
+    conds.push_back(0x00);  // jb code
     AppendCmpEsiImm(conds, cap.type_offset, static_cast<int32_t>(cap.type_max));
     size_t j3 = conds.size();
-    conds.push_back(0x77); conds.push_back(0x00);               // ja code
-    conds.push_back(0x89); conds.push_back(0x35);               // mov [cur_item],esi
+    conds.push_back(0x77);
+    conds.push_back(0x00);  // ja code
+    conds.push_back(0x89);
+    conds.push_back(0x35);  // mov [cur_item],esi
     AppendLe32(conds, static_cast<uint32_t>(cur_item_addr));
     size_t code_pos = conds.size();
     // 回填三条条件跳转的目标(code 标签)
@@ -361,10 +368,8 @@ std::vector<unsigned char> GameModder::BuildCapItemType(uintptr_t cur_item_addr,
 
 std::vector<unsigned char> GameModder::BuildCave(uintptr_t cur_item_addr, uintptr_t cave_addr,
                                                  uintptr_t return_addr, uint8_t disp,
-                                                 const CaptureCfg& capture,
-                                                 uintptr_t freeze_addr,
-                                                 uintptr_t bag_flag_addr,
-                                                 uint32_t bag_flag_value,
+                                                 const CaptureCfg& capture, uintptr_t freeze_addr,
+                                                 uintptr_t bag_flag_addr, uint32_t bag_flag_value,
                                                  uintptr_t flag_last_addr,
                                                  uintptr_t flag_arm_addr) {
     // "判断 + 捕获"段由捕获条件注册表按 capture.type 生成(无 if-else);
@@ -385,12 +390,15 @@ std::vector<unsigned char> GameModder::BuildCave(uintptr_t cur_item_addr, uintpt
     };
     auto emit32 = [&](int kind) {
         jmp32.emplace_back(cave.size(), kind);
-        cave.push_back(0x00); cave.push_back(0x00);
-        cave.push_back(0x00); cave.push_back(0x00);
+        cave.push_back(0x00);
+        cave.push_back(0x00);
+        cave.push_back(0x00);
+        cave.push_back(0x00);
     };
     if (freeze_addr) {
         // 冻结门: freeze!=0 跳过捕获段。cmp dword [freeze],0 ; jne skip
-        cave.push_back(0x83); cave.push_back(0x3D);
+        cave.push_back(0x83);
+        cave.push_back(0x3D);
         AppendLe32(cave, static_cast<uint32_t>(freeze_addr));
         cave.push_back(0x00);
         cave.push_back(0x75);
@@ -401,33 +409,46 @@ std::vector<unsigned char> GameModder::BuildCave(uintptr_t cur_item_addr, uintpt
         //   0->1 边缘 -> 记 last、设 arm=1、jmp skip(本拍不捕);下一拍 arm==1 -> arm=0 捕获一次。
         //   悬停/场景期 flag 平直 -> 无边缘且 arm 早已 0 -> 一律跳过,不入闩锁。
         // ecx=临时寄存器(原指令只重写 eax/esi,不依赖 ecx)。
-        cave.push_back(0x8B); cave.push_back(0x0D);              // mov ecx,[flag]
+        cave.push_back(0x8B);
+        cave.push_back(0x0D);  // mov ecx,[flag]
         AppendLe32(cave, static_cast<uint32_t>(bag_flag_addr));
-        cave.push_back(0x3B); cave.push_back(0x0D);              // cmp ecx,[last]
+        cave.push_back(0x3B);
+        cave.push_back(0x0D);  // cmp ecx,[last]
         AppendLe32(cave, static_cast<uint32_t>(flag_last_addr));
-        cave.push_back(0x74);                                   // je .noedge
+        cave.push_back(0x74);  // je .noedge
         emit8(0);
-        cave.push_back(0x89); cave.push_back(0x0D);              // mov [last],ecx
+        cave.push_back(0x89);
+        cave.push_back(0x0D);  // mov [last],ecx
         AppendLe32(cave, static_cast<uint32_t>(flag_last_addr));
-        cave.push_back(0x83); cave.push_back(0xF9);              // cmp ecx,value
+        cave.push_back(0x83);
+        cave.push_back(0xF9);  // cmp ecx,value
         cave.push_back(static_cast<unsigned char>(bag_flag_value & 0xFF));
-        cave.push_back(0x75);                                   // jne .noedge
+        cave.push_back(0x75);  // jne .noedge
         emit8(0);
-        cave.push_back(0xC7); cave.push_back(0x05);              // mov dword [arm],1
+        cave.push_back(0xC7);
+        cave.push_back(0x05);  // mov dword [arm],1
         AppendLe32(cave, static_cast<uint32_t>(flag_arm_addr));
-        cave.push_back(0x01); cave.push_back(0x00); cave.push_back(0x00); cave.push_back(0x00);
-        cave.push_back(0xE9);                                   // jmp .skip (rel32)
+        cave.push_back(0x01);
+        cave.push_back(0x00);
+        cave.push_back(0x00);
+        cave.push_back(0x00);
+        cave.push_back(0xE9);  // jmp .skip (rel32)
         emit32(1);
         // .noedge:
         noedge_label = cave.size();
-        cave.push_back(0x83); cave.push_back(0x3D);              // cmp dword [arm],0
+        cave.push_back(0x83);
+        cave.push_back(0x3D);  // cmp dword [arm],0
         AppendLe32(cave, static_cast<uint32_t>(flag_arm_addr));
         cave.push_back(0x00);
-        cave.push_back(0x74);                                   // je .skip
+        cave.push_back(0x74);  // je .skip
         emit8(1);
-        cave.push_back(0xC7); cave.push_back(0x05);              // mov dword [arm],0
+        cave.push_back(0xC7);
+        cave.push_back(0x05);  // mov dword [arm],0
         AppendLe32(cave, static_cast<uint32_t>(flag_arm_addr));
-        cave.push_back(0x00); cave.push_back(0x00); cave.push_back(0x00); cave.push_back(0x00);
+        cave.push_back(0x00);
+        cave.push_back(0x00);
+        cave.push_back(0x00);
+        cave.push_back(0x00);
     }
     size_t capture_start = cave.size();
     cave.insert(cave.end(), capture_code.begin(), capture_code.end());
@@ -443,11 +464,13 @@ std::vector<unsigned char> GameModder::BuildCave(uintptr_t cur_item_addr, uintpt
         cave[e.first + 2] = static_cast<unsigned char>((rel >> 16) & 0xFF);
         cave[e.first + 3] = static_cast<unsigned char>((rel >> 24) & 0xFF);
     }
-    cave.push_back(0x8B); cave.push_back(0x44);                 // mov eax,[esi+eax*4+disp]
-    cave.push_back(0x86); cave.push_back(disp & 0xFF);
-    cave.push_back(0x5E);                                       // pop esi
+    cave.push_back(0x8B);
+    cave.push_back(0x44);  // mov eax,[esi+eax*4+disp]
+    cave.push_back(0x86);
+    cave.push_back(disp & 0xFF);
+    cave.push_back(0x5E);  // pop esi
     uint32_t rel = static_cast<uint32_t>(return_addr - (cave_addr + cave.size() + 5));
-    cave.push_back(0xE9);                                       // jmp returnhere
+    cave.push_back(0xE9);  // jmp returnhere
     AppendLe32(cave, rel);
     return cave;
 }
@@ -456,10 +479,8 @@ uintptr_t GameModder::FindCurItemSlot(uintptr_t hook_addr) {
     // 从已注入的 jmp 解析 cave,定位 "mov [cur_item],esi"(89 35 <addr>)中的 cur_item 槽地址。
     auto jmp = mem_.Read(hook_addr, 5);
     if (jmp[0] != 0xE9) return 0;
-    int32_t rel = static_cast<int32_t>(jmp[1]) |
-                  (static_cast<int32_t>(jmp[2]) << 8) |
-                  (static_cast<int32_t>(jmp[3]) << 16) |
-                  (static_cast<int32_t>(jmp[4]) << 24);
+    int32_t rel = static_cast<int32_t>(jmp[1]) | (static_cast<int32_t>(jmp[2]) << 8) |
+                  (static_cast<int32_t>(jmp[3]) << 16) | (static_cast<int32_t>(jmp[4]) << 24);
     uintptr_t cave_addr = static_cast<uintptr_t>((hook_addr + 5 + rel) & 0xFFFFFFFFULL);
     std::vector<unsigned char> cave;
     try {
@@ -636,10 +657,8 @@ uintptr_t GameModder::GetItemBase() {
             "尚未注入捕获 hook:请检查是否已点\"初始化\"(注入失败时重新初始化)。"
             "人物修改不受影响。");
     if (p == 0 || p == 0xFFFFFFFF)
-        throw std::runtime_error(
-            "当前无手持物品:请在游戏中拾起物品并保持在光标上,再读取/保存。");
-    return p + static_cast<uintptr_t>(
-                   static_cast<long long>(config_.Current().item_base_adjust));
+        throw std::runtime_error("当前无手持物品:请在游戏中拾起物品并保持在光标上,再读取/保存。");
+    return p + static_cast<uintptr_t>(static_cast<long long>(config_.Current().item_base_adjust));
 }
 
 // ============================================================================
@@ -657,8 +676,7 @@ BasicState GameModder::ReadBasicFields(uintptr_t item_base) {
             break;
         }
     std::optional<int> type_val;
-    if (type_field)
-        type_val = static_cast<int>(mem_.ReadUInt32(item_base + type_field->offset));
+    if (type_field) type_val = static_cast<int>(mem_.ReadUInt32(item_base + type_field->offset));
 
     for (const auto& f : mode.basic_fields) {
         if (f.type == "string_ptr") {
@@ -676,9 +694,9 @@ BasicState GameModder::ReadBasicFields(uintptr_t item_base) {
     // 弓箭数量:非箭/矢显示 -1
     for (const auto& f : mode.basic_fields) {
         if (f.conditional && f.conditional->field == "类型") {
-            bool in = type_val &&
-                      std::find(f.conditional->values.begin(), f.conditional->values.end(),
-                                *type_val) != f.conditional->values.end();
+            bool in =
+                type_val && std::find(f.conditional->values.begin(), f.conditional->values.end(),
+                                      *type_val) != f.conditional->values.end();
             if (!in) result.ints[f.label] = -1;
         }
     }
@@ -799,8 +817,7 @@ void GameModder::WriteBasicFields(uintptr_t item_base, const BasicState& values)
         if (f.type == "string_ptr") {
             // 字符串字段(武器名字)直接写
             auto sit = values.strs.find(f.label);
-            if (sit != values.strs.end())
-                WriteStringField(item_base, f, sit->second);
+            if (sit != values.strs.end()) WriteStringField(item_base, f, sit->second);
             continue;
         }
         auto it = values.ints.find(f.label);
@@ -835,9 +852,8 @@ void GameModder::WriteBasicFields(uintptr_t item_base, const BasicState& values)
             WriteField(item_base, f, v);
         } else if (f.conditional) {
             // 弓箭数量:仅类型为箭/矢时写入
-            if (type_val &&
-                std::find(f.conditional->values.begin(), f.conditional->values.end(),
-                          *type_val) != f.conditional->values.end())
+            if (type_val && std::find(f.conditional->values.begin(), f.conditional->values.end(),
+                                      *type_val) != f.conditional->values.end())
                 WriteField(item_base, f, f.Clamp(it->second));
             // 否则不写入
         } else if (f.force_when) {
@@ -885,7 +901,7 @@ std::vector<ItemProperty> GameModder::ReadAttributes(uintptr_t item_base) {
                        cfg.value_offset + 4})
         if (o > max_off) max_off = o;
     const int need = (int)max_off;
-    std::vector<unsigned char> slot((size_t)need);   // 循环外分配一次, 逐节点复用
+    std::vector<unsigned char> slot((size_t)need);  // 循环外分配一次, 逐节点复用
     for (uintptr_t addr : ReadNodeAddrs(item_base)) {
         if (!mem_.ReadBuf(addr, slot.data(), need)) continue;  // 坏地址跳过(同旧行为)
         auto dw = [&](uint32_t off) -> uint32_t {
@@ -1058,8 +1074,8 @@ uintptr_t GameModder::FindFreeStaticNode(const std::set<uintptr_t>& used) {
         if (ok) {
             try {
                 auto data = mem_.Read(addr, size);
-                bool all_zero = std::all_of(data.begin(), data.end(),
-                                            [](unsigned char b) { return b == 0; });
+                bool all_zero =
+                    std::all_of(data.begin(), data.end(), [](unsigned char b) { return b == 0; });
                 if (all_zero) return addr;
             } catch (...) {
             }

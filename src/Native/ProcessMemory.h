@@ -13,9 +13,7 @@ struct ProcessInfo {
     std::string name;  // e.g. "POQ.EXE"
 
     /// Display string for the process combo box: "POQ.EXE  (PID=1234)".
-    std::string Display() const {
-        return name + "  (PID=" + std::to_string(pid) + ")";
-    }
+    std::string Display() const { return name + "  (PID=" + std::to_string(pid) + ")"; }
 };
 
 /// One enumerated module of a target process (used to resolve the game image base).

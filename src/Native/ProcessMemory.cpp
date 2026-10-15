@@ -2,8 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -15,16 +15,31 @@ namespace poq {
 
 namespace {
 
+// 计划 260929 #16: HANDLE 出作用域自动关闭 —— 现在的 5 处快照/远程线程虽然路径上
+// 都正确 Close 了, 但结构上没有保证; 后续在中间加 return/throw 就会泄漏, 用 RAII 钉死。
+class HandleGuard {
+public:
+    explicit HandleGuard(HANDLE h) : h_(h) {}
+    ~HandleGuard() {
+        if (h_ && h_ != INVALID_HANDLE_VALUE) ::CloseHandle(h_);
+    }
+    HandleGuard(const HandleGuard&) = delete;
+    HandleGuard& operator=(const HandleGuard&) = delete;
+    HANDLE get() const { return h_; }
+
+private:
+    HANDLE h_;
+};
+
 // Format a Win32 error code into a human-readable string.
 std::string FormatWin32Error(DWORD err) {
     char* buf = nullptr;
     DWORD n = ::FormatMessageA(
-        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-            FORMAT_MESSAGE_IGNORE_INSERTS,
-        nullptr, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        reinterpret_cast<LPSTR>(&buf), 0, nullptr);
-    std::string msg = (buf && n > 0) ? std::string(buf, n)
-                                     : std::string("error ") + std::to_string(err);
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), reinterpret_cast<LPSTR>(&buf), 0,
+        nullptr);
+    std::string msg =
+        (buf && n > 0) ? std::string(buf, n) : std::string("error ") + std::to_string(err);
     if (buf) ::LocalFree(buf);
     while (!msg.empty() && (msg.back() == '\r' || msg.back() == '\n' || msg.back() == ' '))
         msg.pop_back();
@@ -54,19 +69,18 @@ std::string ToLower(const std::string& s) {
 
 std::string WideToUtf8(const std::wstring& w) {
     if (w.empty()) return "";
-    int len = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
-                                    nullptr, 0, nullptr, nullptr);
+    int len = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0,
+                                    nullptr, nullptr);
     if (len <= 0) return "";
     std::string out(static_cast<size_t>(len), '\0');
-    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), &out[0], len,
-                          nullptr, nullptr);
+    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), &out[0], len, nullptr,
+                          nullptr);
     return out;
 }
 
 std::wstring Utf8ToWide(const std::string& s) {
     if (s.empty()) return L"";
-    int wlen = ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
-                                     nullptr, 0);
+    int wlen = ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
     if (wlen <= 0) return L"";
     std::wstring out(static_cast<size_t>(wlen), L'\0');
     ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), &out[0], wlen);
@@ -76,14 +90,12 @@ std::wstring Utf8ToWide(const std::string& s) {
 // Decode a byte string with the given code page into UTF-8. Nullopt on failure.
 std::optional<std::string> DecodeBytes(const std::string& bytes, UINT cp) {
     if (bytes.empty()) return std::nullopt;
-    int wlen = ::MultiByteToWideChar(cp, 0, bytes.data(), static_cast<int>(bytes.size()),
-                                     nullptr, 0);
+    int wlen =
+        ::MultiByteToWideChar(cp, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
     if (wlen <= 0) return std::nullopt;
     std::vector<wchar_t> wbuf(static_cast<size_t>(wlen));
-    ::MultiByteToWideChar(cp, 0, bytes.data(), static_cast<int>(bytes.size()), wbuf.data(),
-                          wlen);
-    int ulen = ::WideCharToMultiByte(CP_UTF8, 0, wbuf.data(), wlen, nullptr, 0, nullptr,
-                                     nullptr);
+    ::MultiByteToWideChar(cp, 0, bytes.data(), static_cast<int>(bytes.size()), wbuf.data(), wlen);
+    int ulen = ::WideCharToMultiByte(CP_UTF8, 0, wbuf.data(), wlen, nullptr, 0, nullptr, nullptr);
     if (ulen <= 0) return std::nullopt;
     std::string out(static_cast<size_t>(ulen), '\0');
     ::WideCharToMultiByte(CP_UTF8, 0, wbuf.data(), wlen, &out[0], ulen, nullptr, nullptr);
@@ -99,7 +111,9 @@ void AppendLe32(std::vector<unsigned char>& v, uint32_t x) {
 
 }  // namespace
 
-ProcessMemory::~ProcessMemory() { Close(); }
+ProcessMemory::~ProcessMemory() {
+    Close();
+}
 
 // ============================================================================
 // 进程 / 模块枚举
@@ -109,6 +123,7 @@ std::vector<ProcessInfo> ProcessMemory::EnumerateProcesses(const std::string& na
     std::vector<ProcessInfo> list;
     HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == nullptr || snap == INVALID_HANDLE_VALUE) return list;
+    HandleGuard snap_guard(snap);
 
     // 用 W 变体(与 Qt 版一致),显式转换 DWORD -> unsigned int。
     PROCESSENTRY32W pe{};
@@ -132,13 +147,13 @@ std::vector<ModuleInfo> ProcessMemory::EnumerateModules(unsigned int pid) {
     // 从 64 位进程枚举 32 位(WoW64)目标进程的模块时必须带 SNAPMODULE32。
     HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
     if (snap == nullptr || snap == INVALID_HANDLE_VALUE) return list;
+    HandleGuard snap_guard(snap);
     MODULEENTRY32W me{};
     me.dwSize = sizeof(me);
     if (::Module32FirstW(snap, &me)) {
         do {
             std::string name = WideToUtf8(me.szModule);
-            list.push_back({std::move(name),
-                            reinterpret_cast<uintptr_t>(me.modBaseAddr),
+            list.push_back({std::move(name), reinterpret_cast<uintptr_t>(me.modBaseAddr),
                             static_cast<uint32_t>(me.modBaseSize)});
         } while (::Module32NextW(snap, &me));
     }
@@ -146,8 +161,7 @@ std::vector<ModuleInfo> ProcessMemory::EnumerateModules(unsigned int pid) {
     return list;
 }
 
-std::optional<uintptr_t> ProcessMemory::FindModuleBase(unsigned int pid,
-                                                       const std::string& name) {
+std::optional<uintptr_t> ProcessMemory::FindModuleBase(unsigned int pid, const std::string& name) {
     if (name.empty()) return std::nullopt;
     std::string target = name;
     size_t slash = target.find_last_of("/\\");
@@ -172,6 +186,7 @@ std::optional<std::string> ProcessMemory::FindModulePath(unsigned int pid,
     // 从 64 位进程枚举 32 位(WoW64)目标进程的模块时必须带 SNAPMODULE32。
     HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
     if (snap == nullptr || snap == INVALID_HANDLE_VALUE) return std::nullopt;
+    HandleGuard snap_guard(snap);
     MODULEENTRY32W me{};
     me.dwSize = sizeof(me);
     std::optional<std::string> out;
@@ -237,13 +252,12 @@ std::vector<unsigned char> ProcessMemory::Read(uintptr_t base_address, int n_siz
     if (handle_ == nullptr) throw std::runtime_error("进程未打开");
     std::vector<unsigned char> buf(n_size);
     SIZE_T bytes_read = 0;
-    BOOL ok = ::ReadProcessMemory(handle_,
-                                  reinterpret_cast<LPCVOID>(base_address),
-                                  buf.data(), static_cast<SIZE_T>(n_size), &bytes_read);
+    BOOL ok = ::ReadProcessMemory(handle_, reinterpret_cast<LPCVOID>(base_address), buf.data(),
+                                  static_cast<SIZE_T>(n_size), &bytes_read);
     if (!ok) {
         DWORD err = ::GetLastError();
-        throw std::runtime_error("ReadProcessMemory 失败 @ " + AddrHex(base_address) +
-                                 ": " + FormatWin32Error(err));
+        throw std::runtime_error("ReadProcessMemory 失败 @ " + AddrHex(base_address) + ": " +
+                                 FormatWin32Error(err));
     }
     return buf;
 }
@@ -258,24 +272,19 @@ bool ProcessMemory::ReadBuf(uintptr_t base_address, void* out, int n_size) noexc
 
 unsigned int ProcessMemory::ReadUInt32(uintptr_t base_address) {
     auto data = Read(base_address, 4);
-    return static_cast<unsigned int>(data[0]) |
-           (static_cast<unsigned int>(data[1]) << 8) |
-           (static_cast<unsigned int>(data[2]) << 16) |
-           (static_cast<unsigned int>(data[3]) << 24);
+    return static_cast<unsigned int>(data[0]) | (static_cast<unsigned int>(data[1]) << 8) |
+           (static_cast<unsigned int>(data[2]) << 16) | (static_cast<unsigned int>(data[3]) << 24);
 }
 
 uint16_t ProcessMemory::ReadWord(uintptr_t base_address) {
     auto data = Read(base_address, 2);
-    return static_cast<uint16_t>(data[0]) |
-           (static_cast<uint16_t>(data[1]) << 8);
+    return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
 }
 
 float ProcessMemory::ReadFloat(uintptr_t base_address) {
     auto data = Read(base_address, 4);
-    uint32_t bits = static_cast<uint32_t>(data[0]) |
-                    (static_cast<uint32_t>(data[1]) << 8) |
-                    (static_cast<uint32_t>(data[2]) << 16) |
-                    (static_cast<uint32_t>(data[3]) << 24);
+    uint32_t bits = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
+                    (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24);
     float f;
     std::memcpy(&f, &bits, sizeof(f));
     return f;
@@ -325,8 +334,8 @@ void ProcessMemory::WriteCode(uintptr_t base_address, const std::vector<unsigned
     WriteInternal(base_address, code.data(), code.size(), true);
 }
 
-void ProcessMemory::WriteInternal(uintptr_t base_address, const unsigned char* data,
-                                  size_t size, bool is_code) {
+void ProcessMemory::WriteInternal(uintptr_t base_address, const unsigned char* data, size_t size,
+                                  bool is_code) {
     // 计划 P1(#7): 完整检查 + 恢复页面保护 + 代码写后 flush 指令缓存。
     // 原实现漏检 VirtualProtectEx 返回值、从不恢复 old_protect、不校验 bytes_written,
     // 写机器码后也没 flush —— 目标 CPU 可能仍执行旧指令缓存。
@@ -336,7 +345,7 @@ void ProcessMemory::WriteInternal(uintptr_t base_address, const unsigned char* d
 
     DWORD old_protect = 0;
     if (!::VirtualProtectEx(handle_, reinterpret_cast<LPVOID>(base_address),
-                             static_cast<SIZE_T>(size), PAGE_EXECUTE_READWRITE, &old_protect)) {
+                            static_cast<SIZE_T>(size), PAGE_EXECUTE_READWRITE, &old_protect)) {
         DWORD err = ::GetLastError();
         throw std::runtime_error("VirtualProtectEx 失败 @ " + AddrHex(base_address) + ": " +
                                  FormatWin32Error(err));
@@ -428,15 +437,16 @@ uintptr_t ProcessMemory::Alloc(size_t size, uintptr_t near_addr) {
         const uint32_t step = 0x10000;  // 64KB
         uint32_t addr = static_cast<uint32_t>(near_addr) & 0xFFFF0000;
         for (int i = 0; i < 512; ++i) {
-            void* p = ::VirtualAllocEx(handle_, reinterpret_cast<LPVOID>(static_cast<uintptr_t>(addr)),
-                                       size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+            void* p =
+                ::VirtualAllocEx(handle_, reinterpret_cast<LPVOID>(static_cast<uintptr_t>(addr)),
+                                 size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
             if (p) return reinterpret_cast<uintptr_t>(p);
             addr = (addr - step) & 0xFFFFFFFF;
             if (addr < 0x10000) break;
         }
     }
-    void* p = ::VirtualAllocEx(handle_, nullptr, size, MEM_COMMIT | MEM_RESERVE,
-                               PAGE_EXECUTE_READWRITE);
+    void* p =
+        ::VirtualAllocEx(handle_, nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!p) {
         DWORD err = ::GetLastError();
         throw std::runtime_error("VirtualAllocEx 失败: " + FormatWin32Error(err));
@@ -459,8 +469,8 @@ void ProcessMemory::Free(uintptr_t address) {
 // 计划 P1/P2(#8): 超时不再直接 TerminateThread 后当作普通失败返回 ——
 // 被强杀的线程可能持有游戏内部锁 / 正在 malloc / 改全局对象, 目标进程可能已损坏,
 // 调用方需要知道"状态不可信", 并避免释放它可能仍在访问的 stub/buffer。
-ProcessMemory::RemoteCallResult ProcessMemory::CallRemoteThreadDetailed(
-    uintptr_t stub, int wait_ms, uintptr_t result_slot) {
+ProcessMemory::RemoteCallResult ProcessMemory::CallRemoteThreadDetailed(uintptr_t stub, int wait_ms,
+                                                                        uintptr_t result_slot) {
     RemoteCallResult rr;
     if (!IsOpen()) {
         rr.status = RemoteCallStatus::kFailed;
@@ -472,6 +482,7 @@ ProcessMemory::RemoteCallResult ProcessMemory::CallRemoteThreadDetailed(
         DWORD err = ::GetLastError();
         throw std::runtime_error("CreateRemoteThread 失败: " + FormatWin32Error(err));
     }
+    HandleGuard thread_guard(h_thread);
     DWORD r = ::WaitForSingleObject(h_thread, static_cast<DWORD>(wait_ms));
     if (r == WAIT_OBJECT_0) {
         try {
@@ -488,7 +499,7 @@ ProcessMemory::RemoteCallResult ProcessMemory::CallRemoteThreadDetailed(
     } else {
         rr.status = RemoteCallStatus::kFailed;
     }
-    ::CloseHandle(h_thread);
+    // thread_guard 析构统一 CloseHandle
     // 进程已退出时统一上报 kProcessExited(远程内存随进程结束自动回收, 不必再管)
     if (rr.status != RemoteCallStatus::kCompleted && !IsProcessAlive()) {
         rr.status = RemoteCallStatus::kProcessExited;
@@ -507,17 +518,15 @@ uintptr_t ProcessMemory::FindExport(uintptr_t module_base, const std::string& na
     try {
         auto mz = Read(module_base, 0x40);
         if (mz[0] != 'M' || mz[1] != 'Z') return 0;
-        uint32_t e_lfanew = static_cast<uint32_t>(mz[0x3C]) |
-                            (static_cast<uint32_t>(mz[0x3D]) << 8) |
-                            (static_cast<uint32_t>(mz[0x3E]) << 16) |
-                            (static_cast<uint32_t>(mz[0x3F]) << 24);
+        uint32_t e_lfanew =
+            static_cast<uint32_t>(mz[0x3C]) | (static_cast<uint32_t>(mz[0x3D]) << 8) |
+            (static_cast<uint32_t>(mz[0x3E]) << 16) | (static_cast<uint32_t>(mz[0x3F]) << 24);
         auto pe = Read(module_base + e_lfanew, 0x88);
         if (pe[0] != 'P' || pe[1] != 'E') return 0;
         uint16_t magic = static_cast<uint16_t>(pe[0x18] | (pe[0x19] << 8));
         if (magic != 0x10B) return 0;  // PE32 only
         auto rd32 = [](const std::vector<unsigned char>& b, size_t off) -> uint32_t {
-            return static_cast<uint32_t>(b[off]) |
-                   (static_cast<uint32_t>(b[off + 1]) << 8) |
+            return static_cast<uint32_t>(b[off]) | (static_cast<uint32_t>(b[off + 1]) << 8) |
                    (static_cast<uint32_t>(b[off + 2]) << 16) |
                    (static_cast<uint32_t>(b[off + 3]) << 24);
         };
@@ -539,8 +548,7 @@ uintptr_t ProcessMemory::FindExport(uintptr_t module_base, const std::string& na
                     uint32_t func_rva = ReadUInt32(module_base + addr_of_functions +
                                                    static_cast<uint32_t>(ordinal) * 4);
                     // 转发器检测:func RVA 落在导出目录内(指向名字字符串)
-                    if (func_rva >= export_rva && func_rva < export_rva + export_size)
-                        return 0;
+                    if (func_rva >= export_rva && func_rva < export_rva + export_size) return 0;
                     return module_base + func_rva;
                 }
             } catch (...) {
@@ -558,8 +566,8 @@ uintptr_t ProcessMemory::AllocMalloc(unsigned int pid, uint32_t size) {
     // 1) 找 CRT 的 malloc
     uintptr_t malloc_addr = 0;
     static const char* kCrtModules[] = {
-        "msvcrt.dll", "msvcr100.dll", "msvcr110.dll", "msvcr120.dll",
-        "ucrtbase.dll", "api-ms-win-crt-heap-l1-1-0.dll",
+        "msvcrt.dll",   "msvcr100.dll", "msvcr110.dll",
+        "msvcr120.dll", "ucrtbase.dll", "api-ms-win-crt-heap-l1-1-0.dll",
     };
     for (const char* mod : kCrtModules) {
         auto base = FindModuleBase(pid, mod);
@@ -586,24 +594,33 @@ uintptr_t ProcessMemory::AllocMalloc(unsigned int pid, uint32_t size) {
     try {
         WriteUInt32(result_addr, 0);
         std::vector<unsigned char> code;
-        code.push_back(0xB8); AppendLe32(code, static_cast<uint32_t>(malloc_addr));  // mov eax, malloc
-        code.push_back(0x68); AppendLe32(code, size);                                // push size
-        code.push_back(0xFF); code.push_back(0xD0);                                  // call eax
-        code.push_back(0x83); code.push_back(0xC4); code.push_back(0x04);            // add esp,4
-        code.push_back(0xA3); AppendLe32(code, static_cast<uint32_t>(result_addr));  // mov [result],eax
-        code.push_back(0xB8); AppendLe32(code, static_cast<uint32_t>(exit_addr));    // mov eax, ExitThread
-        code.push_back(0x6A); code.push_back(0x00);                                  // push 0
-        code.push_back(0xFF); code.push_back(0xD0);                                  // call eax
+        code.push_back(0xB8);
+        AppendLe32(code, static_cast<uint32_t>(malloc_addr));  // mov eax, malloc
+        code.push_back(0x68);
+        AppendLe32(code, size);  // push size
+        code.push_back(0xFF);
+        code.push_back(0xD0);  // call eax
+        code.push_back(0x83);
+        code.push_back(0xC4);
+        code.push_back(0x04);  // add esp,4
+        code.push_back(0xA3);
+        AppendLe32(code, static_cast<uint32_t>(result_addr));  // mov [result],eax
+        code.push_back(0xB8);
+        AppendLe32(code, static_cast<uint32_t>(exit_addr));  // mov eax, ExitThread
+        code.push_back(0x6A);
+        code.push_back(0x00);  // push 0
+        code.push_back(0xFF);
+        code.push_back(0xD0);  // call eax
         Write(stub, code);
-        HANDLE h_thread = ::CreateRemoteThread(
-            handle_, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(stub), nullptr,
-            0, nullptr);
+        HANDLE h_thread = ::CreateRemoteThread(handle_, nullptr, 0,
+                                               reinterpret_cast<LPTHREAD_START_ROUTINE>(stub),
+                                               nullptr, 0, nullptr);
         if (!h_thread) {
             Free(stub);
             return 0;
         }
+        HandleGuard thread_guard(h_thread);
         ::WaitForSingleObject(h_thread, 5000);
-        ::CloseHandle(h_thread);
         result = ReadUInt32(result_addr);
     } catch (...) {
         result = 0;

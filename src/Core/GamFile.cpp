@@ -2,10 +2,10 @@
 
 #include "Core/ItemData.h"
 
-#include <cstring>
-#include <cstdio>
-#include <algorithm>
 #include <windows.h>
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
 
 namespace poq {
 
@@ -24,12 +24,12 @@ static FILE* FOpenW(const std::string& path, const wchar_t* mode) {
 // ---------------------------------------------------------------------------
 // 基础字节工具(与 python gamkit 一致)
 // ---------------------------------------------------------------------------
-static const uint8_t kACH[] = {
-    'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t',
-    'u','v','w','x','y','z','0','1','2','3','4','5','6','7','8','9','_'
-};
+static const uint8_t kACH[] = {'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+                               'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+                               '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '_'};
 static bool IsAliasCh(uint8_t b) {
-    for (size_t i = 0; i < sizeof(kACH); ++i) if (kACH[i] == b) return true;
+    for (size_t i = 0; i < sizeof(kACH); ++i)
+        if (kACH[i] == b) return true;
     return false;
 }
 
@@ -94,7 +94,10 @@ bool find_alias(const std::vector<uint8_t>& c, std::string& alias, size_t& aend)
         for (size_t i = 0; i < strlen; ++i) {
             uint8_t b = c[off + 4 + i] ^ (uint8_t)((strlen - 0x56 - i) & 0xFF);
             if (b == 0) break;
-            if (!IsAliasCh(b)) { ok = false; break; }
+            if (!IsAliasCh(b)) {
+                ok = false;
+                break;
+            }
             s.push_back((char)b);
             ++nz;
         }
@@ -145,8 +148,10 @@ static bool MakeItem(size_t pos, const std::vector<uint8_t>& buf, GamItem& it) {
             return r;
         };
         it.alias_low = low(it.alias);
-        if (it.name.empty() || it.alias == "?") it.disp_low = it.alias_low;
-        else it.disp_low = low(it.name + "(" + it.alias + ")");
+        if (it.name.empty() || it.alias == "?")
+            it.disp_low = it.alias_low;
+        else
+            it.disp_low = low(it.name + "(" + it.alias + ")");
     }
     it.ParseAffixes();
     return true;
@@ -156,33 +161,47 @@ static bool MakeItem(size_t pos, const std::vector<uint8_t>& buf, GamItem& it) {
 // 固定字段表(相对 aend)
 // ---------------------------------------------------------------------------
 namespace {
-struct FieldDef { const char* name; uint32_t off; };
+struct FieldDef {
+    const char* name;
+    uint32_t off;
+};
 const FieldDef kFields[] = {
-    {"lvl", 0x0C}, {"dur", 0x30}, {"durmax", 0x34}, {"f_c8", 0xC8},
-    {"price", 0xCC}, {"wgt", 0xD0}, {"type", 0xD4}, {"ident", 0xE0},
-    {"f_e4", 0xE4}, {"f_e8", 0xE8}, {"sockets", 0xFC}, {"f_100", 0x100},
-    {"f_104", 0x104}, {"f_10c", 0x10C}, {"f_110", 0x110}, {"f_118", 0x118},
-    {"f_11c", 0x11C}, {"f_124", 0x124}, {"req_lvl", 0x128}, {"req_str", 0x12C},
-    {"req_agi", 0x130}, {"req_con", 0x134}, {"wx", 0x140}, {"arrows", 0x370},
+    {"lvl", 0x0C},      {"dur", 0x30},      {"durmax", 0x34},   {"f_c8", 0xC8},
+    {"price", 0xCC},    {"wgt", 0xD0},      {"type", 0xD4},     {"ident", 0xE0},
+    {"f_e4", 0xE4},     {"f_e8", 0xE8},     {"sockets", 0xFC},  {"f_100", 0x100},
+    {"f_104", 0x104},   {"f_10c", 0x10C},   {"f_110", 0x110},   {"f_118", 0x118},
+    {"f_11c", 0x11C},   {"f_124", 0x124},   {"req_lvl", 0x128}, {"req_str", 0x12C},
+    {"req_agi", 0x130}, {"req_con", 0x134}, {"wx", 0x140},      {"arrows", 0x370},
 };
 }  // namespace
 
 const std::vector<GamFile::FieldDesc>& GamFile::FieldList() {
     static const std::vector<FieldDesc> k = {
-        {"lvl", "等级"}, {"dur", "耐久"}, {"durmax", "耐久上限"}, {"price", "价格"},
-        {"wgt", "重量"}, {"type", "类型"}, {"ident", "鉴定"}, {"sockets", "孔数"},
-        {"req_lvl", "等级需求"}, {"req_str", "力量需求"}, {"req_agi", "敏捷需求"},
-        {"req_con", "体质需求"}, {"wx", "五行"}, {"arrows", "箭支数量"},
+        {"lvl", "等级"},         {"dur", "耐久"},         {"durmax", "耐久上限"},
+        {"price", "价格"},       {"wgt", "重量"},         {"type", "类型"},
+        {"ident", "鉴定"},       {"sockets", "孔数"},     {"req_lvl", "等级需求"},
+        {"req_str", "力量需求"}, {"req_agi", "敏捷需求"}, {"req_con", "体质需求"},
+        {"wx", "五行"},          {"arrows", "箭支数量"},
     };
     return k;
 }
 
 int32_t GamItem::GetField(const char* key, bool* ok) const {
     const FieldDef* def = nullptr;
-    for (const auto& f : kFields) if (strcmp(f.name, key) == 0) { def = &f; break; }
-    if (!def) { if (ok) *ok = false; return 0; }
+    for (const auto& f : kFields)
+        if (strcmp(f.name, key) == 0) {
+            def = &f;
+            break;
+        }
+    if (!def) {
+        if (ok) *ok = false;
+        return 0;
+    }
     size_t off = aend + def->off;
-    if (off + 4 > content.size()) { if (ok) *ok = false; return 0; }
+    if (off + 4 > content.size()) {
+        if (ok) *ok = false;
+        return 0;
+    }
     if (ok) *ok = true;
     uint32_t v = GamFile::DwAt(content, off);
     return (int32_t)v;  // -1 = 空
@@ -190,7 +209,11 @@ int32_t GamItem::GetField(const char* key, bool* ok) const {
 
 bool GamItem::SetField(const char* key, int64_t v) {
     const FieldDef* def = nullptr;
-    for (const auto& f : kFields) if (strcmp(f.name, key) == 0) { def = &f; break; }
+    for (const auto& f : kFields)
+        if (strcmp(f.name, key) == 0) {
+            def = &f;
+            break;
+        }
     if (!def) return false;
     size_t off = aend + def->off;
     if (off + 4 > content.size()) return false;
@@ -246,7 +269,7 @@ std::string GamItem::GetGInfo() const {
             size_t used2 = 0;
             if (GamFile::DecStr(content, ginfo_key_off_ + used, val, used2)) return val;
         }
-        ginfo_key_off_ = 0;   // 缓存失效, 退回全扫
+        ginfo_key_off_ = 0;  // 缓存失效, 退回全扫
     }
     // 找字段名串 "G_Info", 其后紧跟的字符串即词条文本
     for (size_t off = 0; off + 4 < content.size(); ++off) {
@@ -257,7 +280,7 @@ std::string GamItem::GetGInfo() const {
                 std::string val;
                 size_t used2 = 0;
                 if (GamFile::DecStr(content, off + used, val, used2)) {
-                    ginfo_key_off_ = off;   // 记住偏移, 后续调用 O(1)
+                    ginfo_key_off_ = off;  // 记住偏移, 后续调用 O(1)
                     return val;
                 }
             }
@@ -277,7 +300,7 @@ bool GamItem::SetGInfo(const std::string& gbktext) {
                 std::string oldval;
                 size_t oldused = 0;
                 if (!GamFile::DecStr(content, valoff, oldval, oldused)) return false;
-                if (oldval == gbktext) return true;   // 无变化: 不动数组
+                if (oldval == gbktext) return true;  // 无变化: 不动数组
                 // 编码新文本: [4B len=(strlen+1)^KEY][chars ^(strlen-0x56-i)][\0 ^...]
                 size_t newlen = gbktext.size();
                 uint32_t slen = (uint32_t)newlen + 1;
@@ -295,7 +318,8 @@ bool GamItem::SetGInfo(const std::string& gbktext) {
                 nb.insert(nb.end(), content.begin() + valoff + oldused, content.end());
                 content = std::move(nb);
                 InvalidateGInfoCache();
-                if (has_affixes) WriteContentLen(content);  // G_Info 在数组前面, 变长/变短都平移了尾帧
+                if (has_affixes)
+                    WriteContentLen(content);  // G_Info 在数组前面, 变长/变短都平移了尾帧
                 dirty = true;
                 // 词条数组是游戏真正读的结构: G_Info 改了必须同步重建它
                 // (no_sync: 补长度时只在文本尾部补空格, 词条行没变, 不必也不能重建 —— 否则
@@ -332,7 +356,7 @@ bool GamItem::SetAlias(const std::string& newalias) {
     InvalidateGInfoCache();
     alias = newalias;
     aend = off + 4 + slenv;
-    if (has_affixes) WriteContentLen(content); // 词条数组随之后移, 收尾长度字段要跟着改
+    if (has_affixes) WriteContentLen(content);  // 词条数组随之后移, 收尾长度字段要跟着改
     dirty = true;
     return true;
 }
@@ -362,8 +386,8 @@ bool GamItem::SetName(const std::string& gbkname) {
     content = std::move(nb);
     InvalidateGInfoCache();
     name = gbkname;
-    aend = (size_t)((long long)aend + delta);  // 名在别名之前, 长度变化会平移 aend
-    if (has_affixes) WriteContentLen(content); // 词条数组随之后移, 收尾长度字段要跟着改
+    aend = (size_t)((long long)aend + delta);   // 名在别名之前, 长度变化会平移 aend
+    if (has_affixes) WriteContentLen(content);  // 词条数组随之后移, 收尾长度字段要跟着改
     dirty = true;
     return true;
 }
@@ -459,19 +483,25 @@ bool GamItem::SyncAffixesFromGInfo() {
 
     // +0x10 = "比例"标志。语料实测分两类:
     //   非天生百分比的属性(命中率/闪避率/普通防御/各系攻击力防御/生命/精气…) -> A=1.0 时文本才带 %
-    //   天生百分比的属性(下表: 攻击速度/吸命/致命一击/眩晕几率/抗性/时间类…) -> 文本恒带 %, 与 A 无关,
+    //   天生百分比的属性(下表: 攻击速度/吸命/致命一击/眩晕几率/抗性/时间类…) -> 文本恒带 %, 与 A
+    //   无关,
     //       且原数组里 A 绝大多数是 0(偶有 1) —— 文本表达不出来, 所以按原节点保留 A
-    static const int kAlwaysPct[] = {0x40, 0x41, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D,
-                                     0x50, 0x52, 0x54, 0x56, 0x58, 0x5A, 0x5C, 0x5D, 0x5E, 0x5F,
-                                     0x60, 0x62};
+    static const int kAlwaysPct[] = {0x40, 0x41, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B,
+                                     0x4C, 0x4D, 0x50, 0x52, 0x54, 0x56, 0x58, 0x5A,
+                                     0x5C, 0x5D, 0x5E, 0x5F, 0x60, 0x62};
     auto defC = [](int id) -> float { return id == 0x41 ? -1.0f : 0.0f; };
     auto colorOf = [](char ch) -> uint32_t {
         switch (ch) {
-            case 'K': return 1;
-            case 'C': return 2;
-            case 'H': return 2;
-            case 'Z': return 3;
-            default: return 0;
+            case 'K':
+                return 1;
+            case 'C':
+                return 2;
+            case 'H':
+                return 2;
+            case 'Z':
+                return 3;
+            default:
+                return 0;
         }
     };
     auto activeOf = [](char ch) -> uint32_t { return ch == 'H' ? 0u : 1u; };
@@ -502,8 +532,10 @@ bool GamItem::SyncAffixesFromGInfo() {
                 break;
             }
         }
-        if (!always) nd.a = pct ? 1.0f : 0.0f;
-        else if (!found) nd.a = 0.0f;
+        if (!always)
+            nd.a = pct ? 1.0f : 0.0f;
+        else if (!found)
+            nd.a = 0.0f;
         return nd;
     };
 
@@ -594,8 +626,9 @@ bool GamItem::SyncAffixesFromGInfo() {
                             break;
                         }
                 list.push_back(mk(kAtkElem[k], mc, ma, agMin, rows[(size_t)agIdx].is_percent));
-                list.push_back(mk(kAtkElem[k] + 1, colorOf(rows[ri].color), activeOf(rows[ri].color),
-                                  (float)rows[ri].vmin, rows[ri].is_percent));
+                list.push_back(mk(kAtkElem[k] + 1, colorOf(rows[ri].color),
+                                  activeOf(rows[ri].color), (float)rows[ri].vmin,
+                                  rows[ri].is_percent));
             }
         }
     }
@@ -615,11 +648,11 @@ bool GamItem::SyncAffixesFromGInfo() {
         if (id == 0x01 || id == 0x03) {
             const int* elems = (id == 0x01) ? kAtkElem : kDefElem;
             bool groupRowsPresent = (id == 0x01) ? hasAtkElem : hasDefElem;
-            if (groupRowsPresent) continue;   // ①
+            if (groupRowsPresent) continue;  // ①
             bool origElem = false;
             for (int k = 0; k < 5; ++k)
                 if (origHas(elems[k])) origElem = true;
-            if (origElem) {                   // ②
+            if (origElem) {  // ②
                 // 5 系节点在原数组里, 继续按 5 系写: 下限/单值 = 聚合行的值;
                 // 上限(只有攻击系有)文本里表达不出来 -> 保留原上限值。
                 // 颜色同攻击侧: 聚合行颜色没变就逐节点保留原色, 变了才整组换色。
@@ -702,8 +735,8 @@ bool GamItem::SyncAffixesFromGInfo() {
                         break;
                     }
             list.push_back(keepOrig ? origMin : mk(id, col, act, v, r.is_percent));
-            list.push_back(mk(pit->second, col, act, mv,
-                              hasMaxRow ? rows[i + 1].is_percent : r.is_percent));
+            list.push_back(
+                mk(pit->second, col, act, mv, hasMaxRow ? rows[i + 1].is_percent : r.is_percent));
             continue;
         }
         list.push_back(mk(id, col, act, v, r.is_percent));
@@ -730,13 +763,13 @@ bool GamItem::PadContentTo(size_t want_len) {
         std::string gi = GetGInfo();
         if (gi.empty()) return false;
         size_t need = want_len - content.size();
-        gi.append(need, ' ');          // G_Info 尾部补空格(解析时逐行去尾空格, 不影响词条)
+        gi.append(need, ' ');  // G_Info 尾部补空格(解析时逐行去尾空格, 不影响词条)
         size_t before = content.size();
-        no_sync = true;                // 只动文本尾部 -> 不重建词条数组
+        no_sync = true;  // 只动文本尾部 -> 不重建词条数组
         bool okpad = SetGInfo(gi);
         no_sync = false;
         if (!okpad) return false;
-        if (content.size() <= before) return false;   // 没长说明补不进去
+        if (content.size() <= before) return false;  // 没长说明补不进去
     }
     return content.size() >= want_len;
 }
@@ -767,7 +800,7 @@ bool GamItem::SetAffixes(const std::vector<AffixNode>& list) {
         putDw(FloatToBits(nd.c));
         putDw(0);
     }
-    putDw((uint32_t)out.size() + 4);   // 内容长度(含本 dword)
+    putDw((uint32_t)out.size() + 4);  // 内容长度(含本 dword)
     content = std::move(out);
     InvalidateGInfoCache();
     affixes = list;
@@ -786,7 +819,8 @@ bool GamItem::ParseGInfoRows(std::vector<GInfoRow>& rows) const {
     size_t scan = 0;  // 逐行扫描游标(不叫 pos: 遮蔽 GamItem::pos 成员)
     while (scan <= txt.size()) {
         size_t nl = txt.find('\n', scan);
-        std::string line = (nl == std::string::npos) ? txt.substr(scan) : txt.substr(scan, nl - scan);
+        std::string line =
+            (nl == std::string::npos) ? txt.substr(scan) : txt.substr(scan, nl - scan);
         bool group_ends = false;
         std::string inner = line;
         // [K / [H / [Z ... (可跨行: 组首行只写 "["+字母, ']' 落在组末行行尾)
@@ -818,8 +852,10 @@ bool GamItem::ParseGInfoRows(std::vector<GInfoRow>& rows) const {
                     // 取名字 token(到空白/GBK对)
                     size_t j = t0;
                     while (j < n - k && (uint8_t)inner[k + j] > 0x20) {
-                        if ((uint8_t)inner[k + j] >= 0x81 && k + j + 1 < n) j += 2;
-                        else j += 1;
+                        if ((uint8_t)inner[k + j] >= 0x81 && k + j + 1 < n)
+                            j += 2;
+                        else
+                            j += 1;
                     }
                     std::string token = inner.substr(k + t0, j - t0);  // 不叫 name: 遮蔽成员
                     is_header = (token == "Lv" || token == "Lv.");
@@ -831,8 +867,10 @@ bool GamItem::ParseGInfoRows(std::vector<GInfoRow>& rows) const {
                     // 名字到第一个空白
                     size_t j = t0;
                     while (j < n - k && (uint8_t)inner[k + j] > 0x20) {
-                        if ((uint8_t)inner[k + j] >= 0x81 && k + j + 1 < n) j += 2;
-                        else j += 1;
+                        if ((uint8_t)inner[k + j] >= 0x81 && k + j + 1 < n)
+                            j += 2;
+                        else
+                            j += 1;
                     }
                     attr = inner.substr(k + t0, j - t0);
                     // 跳过空白
@@ -850,14 +888,19 @@ bool GamItem::ParseGInfoRows(std::vector<GInfoRow>& rows) const {
                         // 百分比标记 \x0f
                         bool is_percent = false;
                         size_t t = d;
-                        while (t < n - k && (uint8_t)inner[k + t] == 0x0F) { is_percent = true; ++t; }
+                        while (t < n - k && (uint8_t)inner[k + t] == 0x0F) {
+                            is_percent = true;
+                            ++t;
+                        }
                         size_t t2 = t;
                         while (t2 < n - k && (inner[k + t2] == ' ' || inner[k + t2] == '\t')) ++t2;
                         bool has_max = false;
                         if (t2 < n - k && inner[k + t2] == '~') {
                             size_t t3 = t2 + 1;
-                            while (t3 < n - k && (inner[k + t3] == ' ' || inner[k + t3] == '\t')) ++t3;
-                            bool neg2 = (t3 < n - k && (inner[k + t3] == '+' || inner[k + t3] == '-'));
+                            while (t3 < n - k && (inner[k + t3] == ' ' || inner[k + t3] == '\t'))
+                                ++t3;
+                            bool neg2 =
+                                (t3 < n - k && (inner[k + t3] == '+' || inner[k + t3] == '-'));
                             if (neg2) ++t3;
                             size_t d2 = t3;
                             while (d2 < n - k && inner[k + d2] >= '0' && inner[k + d2] <= '9') ++d2;
@@ -867,7 +910,10 @@ bool GamItem::ParseGInfoRows(std::vector<GInfoRow>& rows) const {
                                 has_max = true;
                                 // 范围上限后也可能有 \x0f
                                 size_t tt = d2;
-                                while (tt < n - k && (uint8_t)inner[k + tt] == 0x0F) { is_percent = true; ++tt; }
+                                while (tt < n - k && (uint8_t)inner[k + tt] == 0x0F) {
+                                    is_percent = true;
+                                    ++tt;
+                                }
                             }
                         }
                         GInfoRow r{};
@@ -879,7 +925,8 @@ bool GamItem::ParseGInfoRows(std::vector<GInfoRow>& rows) const {
                         r.is_percent = is_percent;
                         rows.push_back(std::move(r));
                         if (has_max) {
-                            // 上限是独立词条: 拆成 "最大<名>" 一行(UI 同道具修改; 保存时再合成 "名 +v ~ +w")
+                            // 上限是独立词条: 拆成 "最大<名>" 一行(UI 同道具修改; 保存时再合成 "名
+                            // +v ~ +w")
                             GInfoRow r2{};
                             r2.color = cur_color;
                             r2.name = std::string("\xD7\xEE\xB4\xF3") + attr;  // GBK "最大"
@@ -902,7 +949,9 @@ bool GamItem::ParseGInfoRows(std::vector<GInfoRow>& rows) const {
 
 bool GamItem::SetGInfoRowValue(size_t idx, long vmin, long vmax) {
     // 值改写受 等长原位 约束(变长需重排)。交原文本编辑面板处理; 此处不自动改写。
-    (void)idx; (void)vmin; (void)vmax;
+    (void)idx;
+    (void)vmin;
+    (void)vmax;
     return false;
 }
 
@@ -954,7 +1003,8 @@ bool GamItem::BuildGInfoText(const std::string& header, const std::vector<GInfoR
         std::snprintf(buf, sizeof(buf), " %s%ld", sign(r.vmin), r.vmin < 0 ? -r.vmin : r.vmin);
         s += buf;
         if (r.has_max) {
-            std::snprintf(buf, sizeof(buf), " ~ %s%ld", sign(r.vmax), r.vmax < 0 ? -r.vmax : r.vmax);
+            std::snprintf(buf, sizeof(buf), " ~ %s%ld", sign(r.vmax),
+                          r.vmax < 0 ? -r.vmax : r.vmax);
             s += buf;
         }
         return s;
@@ -1002,8 +1052,8 @@ struct WalkCtx {
     WalkCtx(GamFile& f_) : f(f_) {}
 };
 
-size_t walkSubtree(const std::vector<uint8_t>& buf, GamFile& f, GamContainer& cur,
-                   size_t p, int depth, int depth_limit, size_t active_cnt_off) {
+size_t walkSubtree(const std::vector<uint8_t>& buf, GamFile& f, GamContainer& cur, size_t p,
+                   int depth, int depth_limit, size_t active_cnt_off) {
     if (p + 12 > buf.size()) return 1;
     uint32_t L = GamFile::X59Dw(buf, p);
     if (L < 0x100 || L > 0x6000 || p + 4 + L + 8 > buf.size()) return 1;
@@ -1058,12 +1108,14 @@ size_t walkSubtree(const std::vector<uint8_t>& buf, GamFile& f, GamContainer& cu
                 }
             }
             ++consumed;
-            if (!found) { end = base + 1; }
+            if (!found) {
+                end = base + 1;
+            }
         }
         return end - p;
     }
     if (!a.empty()) return 4 + L + 8;  // obj 紧凑对象
-    return 1;                 // 未知数据, 逐字节前移(对齐 python)
+    return 1;                          // 未知数据, 逐字节前移(对齐 python)
 }
 }  // namespace
 
@@ -1075,13 +1127,24 @@ bool ParseLoaded(GamFile& f, const std::string& path_, std::string& err);
 bool GamFile::Load(const std::string& path_, GamFile& f, std::string& err) {
     f = GamFile();
     FILE* fp = FOpenW(path_, L"rb");
-    if (!fp) { err = "无法打开文件: " + path_; return false; }
+    if (!fp) {
+        err = "无法打开文件: " + path_;
+        return false;
+    }
     fseek(fp, 0, SEEK_END);
     long sz = ftell(fp);
     fseek(fp, 0, SEEK_SET);
-    if (sz < 0x100 || sz > 0x40000000L) { fclose(fp); err = "文件尺寸异常"; return false; }
+    if (sz < 0x100 || sz > 0x40000000L) {
+        fclose(fp);
+        err = "文件尺寸异常";
+        return false;
+    }
     f.buf.resize((size_t)sz);
-    if (fread(f.buf.data(), 1, (size_t)sz, fp) != (size_t)sz) { fclose(fp); err = "文件读取失败"; return false; }
+    if (fread(f.buf.data(), 1, (size_t)sz, fp) != (size_t)sz) {
+        fclose(fp);
+        err = "文件读取失败";
+        return false;
+    }
     fclose(fp);
 
     return ParseLoaded(f, path_, err);
@@ -1104,7 +1167,8 @@ bool ParseLoaded(GamFile& f, const std::string& path_, std::string& err) {
         f.cont_len = (uint32_t)D32LE(&h40[8]);
     }
     if (f.dataoff < 0x4C || f.dataoff + 0x100 > f.buf.size()) {
-        err = "数据区偏移异常"; return false;
+        err = "数据区偏移异常";
+        return false;
     }
 
     // ---- 遍历 body: 容器=顶层组节点, 走进子树收割物品(场景级分组) ----
@@ -1126,7 +1190,8 @@ bool ParseLoaded(GamFile& f, const std::string& path_, std::string& err) {
             X59Range(f.buf, pos + 4, L, 0x59, cc);
             std::string a;
             size_t aend = 0;
-            if (find_alias(cc, a, aend) && cnt >= 1 && cnt <= 600 && !(cnt == 0 && total == L + 12)) {
+            if (find_alias(cc, a, aend) && cnt >= 1 && cnt <= 600 &&
+                !(cnt == 0 && total == L + 12)) {
                 // 顶层容器根: 走进整棵树, 物品归到本容器
                 f.containers.back().end = pos;
                 GamContainer nc;
@@ -1151,8 +1216,15 @@ bool ParseLoaded(GamFile& f, const std::string& path_, std::string& err) {
             int bc = -1;
             size_t be = 0;
             for (auto& kv : c.gstat)
-                if (kv.second.first > bc) { bc = kv.second.first; bo = kv.first; be = kv.second.second; }
-            if (bc > 0 && bo) { c.insert_cnt_off = bo; c.insert_pos = be; }
+                if (kv.second.first > bc) {
+                    bc = kv.second.first;
+                    bo = kv.first;
+                    be = kv.second.second;
+                }
+            if (bc > 0 && bo) {
+                c.insert_cnt_off = bo;
+                c.insert_pos = be;
+            }
         }
         if (c.end == n) c.last = true;
         if (c.start == f.dataoff) c.first = true;
@@ -1189,19 +1261,24 @@ bool GamFile::Save(GamFile& f, const std::string& out_path,
     std::vector<uint8_t> b = f.buf;
     if (need_relayout) {
         // 支持单/多容器: 全文件按 dirty/删除物品重排(字节整体平移), 再按"受影响容器"更新长度回显。
-        // 容器尾 echo = 容器长度(干净容器); 含紧凑NPC的容器尾不是纯 echo, 跳过(游戏按遍历加载不受影响)。
-        // 按 pos 升序: dirty 物品重编, removed 物品整帧丢弃
+        // 容器尾 echo = 容器长度(干净容器); 含紧凑NPC的容器尾不是纯 echo,
+        // 跳过(游戏按遍历加载不受影响)。 按 pos 升序: dirty 物品重编, removed 物品整帧丢弃
         std::vector<int> idx;
         for (size_t i = 0; i < f.items.size(); ++i)
-            if ((f.items[i].dirty && !f.items[i].is_new) || f.items[i].removed) idx.push_back((int)i);
-        std::sort(idx.begin(), idx.end(), [&](int a, int c) { return f.items[(size_t)a].pos < f.items[(size_t)c].pos; });
+            if ((f.items[i].dirty && !f.items[i].is_new) || f.items[i].removed)
+                idx.push_back((int)i);
+        std::sort(idx.begin(), idx.end(),
+                  [&](int a, int c) { return f.items[(size_t)a].pos < f.items[(size_t)c].pos; });
         std::vector<uint8_t> nb;
         nb.reserve(f.buf.size() + 0x100);
         nb.insert(nb.end(), f.buf.begin(), f.buf.begin() + f.dataoff);  // 保留文件头
         size_t src = f.dataoff;
         for (int i : idx) {
             const auto& it = f.items[(size_t)i];
-            if (it.pos < src) { err = "重排冲突(位置异常)"; return false; }
+            if (it.pos < src) {
+                err = "重排冲突(位置异常)";
+                return false;
+            }
             nb.insert(nb.end(), f.buf.begin() + src, f.buf.begin() + it.pos);
             if (!it.removed) {  // 删除帧: 不加回(即丢弃)
                 std::vector<uint8_t> rec;
@@ -1217,8 +1294,10 @@ bool GamFile::Save(GamFile& f, const std::string& out_path,
             for (int i : idx) {
                 const auto& it = f.items[(size_t)i];
                 if (it.pos < old_pos) {
-                    if (it.removed) d -= (long long)(4 + it.len + 8);
-                    else d += (long long)it.content.size() - (long long)it.len;
+                    if (it.removed)
+                        d -= (long long)(4 + it.len + 8);
+                    else
+                        d += (long long)it.content.size() - (long long)it.len;
                 }
             }
             return d;
@@ -1294,8 +1373,14 @@ bool GamFile::Save(GamFile& f, const std::string& out_path,
         // 等长: 就地重写 dirty 物品; 跳过 is_new
         for (auto& it : f.items) {
             if (!it.dirty || it.is_new) continue;
-            if (it.content.size() != it.len) { err = "物品内容长度变化需走插入流程"; return false; }
-            if (it.pos + 4 + it.len + 8 > f.buf.size()) { err = "物品位置越界"; return false; }
+            if (it.content.size() != it.len) {
+                err = "物品内容长度变化需走插入流程";
+                return false;
+            }
+            if (it.pos + 4 + it.len + 8 > f.buf.size()) {
+                err = "物品位置越界";
+                return false;
+            }
             std::vector<uint8_t> lenb, ccb, cntb, totb;
             RawX59Range((const uint8_t*)&it.len, 4, 0x59, lenb);
             RawX59Range(it.content.data(), it.content.size(), 0x59, ccb);
@@ -1304,9 +1389,12 @@ bool GamFile::Save(GamFile& f, const std::string& out_path,
             uint32_t tot = it.len + 12;
             RawX59Range((const uint8_t*)&tot, 4, 0x59, totb);
             size_t q = it.pos;
-            memcpy(&b[q], lenb.data(), 4); q += 4;
-            memcpy(&b[q], ccb.data(), ccb.size()); q += ccb.size();
-            memcpy(&b[q], cntb.data(), 4); q += 4;
+            memcpy(&b[q], lenb.data(), 4);
+            q += 4;
+            memcpy(&b[q], ccb.data(), ccb.size());
+            q += ccb.size();
+            memcpy(&b[q], cntb.data(), 4);
+            q += 4;
             memcpy(&b[q], totb.data(), 4);
         }
     }
@@ -1318,7 +1406,10 @@ bool GamFile::Save(GamFile& f, const std::string& out_path,
         GamContainer& c = f.containers[(size_t)ci];
         size_t pos_at = c.insert_pos;
         size_t cnt_off = c.insert_cnt_off;
-        if (pos_at > b.size() || cnt_off >= pos_at) { err = "插入位置异常"; return false; }
+        if (pos_at > b.size() || cnt_off >= pos_at) {
+            err = "插入位置异常";
+            return false;
+        }
         // bump count (x59 编码)
         uint32_t old_c = X59Dw(b, cnt_off);
         if (old_c >= 0x10000) {
@@ -1355,7 +1446,10 @@ bool GamFile::Save(GamFile& f, const std::string& out_path,
         }
     }
     FILE* fp = FOpenW(out_path, L"wb");
-    if (!fp) { err = "无法写入: " + out_path; return false; }
+    if (!fp) {
+        err = "无法写入: " + out_path;
+        return false;
+    }
     fwrite(b.data(), 1, b.size(), fp);
     fclose(fp);
     return true;

@@ -17,6 +17,7 @@
 
 #include "Core/SummonSteam.h"
 
+#include <windows.h>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -26,7 +27,6 @@
 #include <stdexcept>
 #include <tuple>
 #include <vector>
-#include <windows.h>
 
 #include "Core/Json.h"
 
@@ -38,11 +38,11 @@ namespace {
 // ---------------------------------------------------------------------------
 // 常量(对齐 summon_tool_steam.py)
 // ---------------------------------------------------------------------------
-constexpr uintptr_t kOffFriendPush = 0x35BAA;   // 召唤强制 Friend imm(push 1 的 01)
-constexpr uintptr_t kOffBound = 0x3586D;        // 召唤类型上限 cmp eax,imm
-constexpr uintptr_t kOffControlCmp = 0x35C32;   // 可控性 cmp [flag],imm / 跳过注册
-constexpr uintptr_t kOffType = 0x3585F;         // 强制召唤类型 mov eax,slot+1
-constexpr uintptr_t kOffMatcherImm = 0x6FAC6;   // 名字匹配器 push 0/1
+constexpr uintptr_t kOffFriendPush = 0x35BAA;  // 召唤强制 Friend imm(push 1 的 01)
+constexpr uintptr_t kOffBound = 0x3586D;       // 召唤类型上限 cmp eax,imm
+constexpr uintptr_t kOffControlCmp = 0x35C32;  // 可控性 cmp [flag],imm / 跳过注册
+constexpr uintptr_t kOffType = 0x3585F;        // 强制召唤类型 mov eax,slot+1
+constexpr uintptr_t kOffMatcherImm = 0x6FAC6;  // 名字匹配器 push 0/1
 // 数据偏移(EasyRPG.dll 镜像内, 2026-10-16 ASLR 实测; 括号为旧绝对地址快照)
 constexpr uintptr_t kOffNamePaoXiao = 0x2371A4;  // 名字槽 slot8(狍鸮)   [旧 0x539771A4]
 constexpr uintptr_t kOffNameZhuYan = 0x2371B0;   // 名字槽 slot9(朱厌源) [旧 0x539771B0]
@@ -59,7 +59,9 @@ constexpr int kMaxRec = 600;
 
 // 模块基址(CmdSummon 入口设置; 同 Summon130.cpp 的 g_mb 模式): RT(偏移)=运行时地址
 uintptr_t g_mb = 0;
-inline uintptr_t RT(uintptr_t off) { return g_mb + off; }
+inline uintptr_t RT(uintptr_t off) {
+    return g_mb + off;
+}
 
 // 控制标志运行时地址。入口处从游戏现场指令(cmp [flag],imm @MB+0x35C32,未打补丁时
 // 的立即数即游戏重定位后的真实地址)实测纠偏 —— 手算偏移差一位就是写错内存崩游戏,
@@ -71,11 +73,11 @@ inline uint32_t FlagAddr() {
 
 // mon_type 映射ID -> 程序槽位(映射ID 3=白狼 跳过鸟=槽3,即 [0,1,2,4,5,6,7,8,9,10])
 const int kMonSlots[10] = {0, 1, 2, 4, 5, 6, 7, 8, 9, 10};
-const char* kMonNames[10] = {"狼",   "虎",   "熊", "白狼", "木偶",
-                             "狗",   "虎蛟", "狍鸮", "朱厌", "善翼"};
+const char* kMonNames[10] = {"狼", "虎",   "熊",   "白狼", "木偶",
+                             "狗", "虎蛟", "狍鸮", "朱厌", "善翼"};
 // 野兽槽位名(slot 0-10)
-const char* kBeastSlots[11] = {"狼",   "虎",   "熊", "鸟", "白狼", "木偶",
-                               "狗",   "虎蛟", "狍鸮", "朱厌", "善翼"};
+const char* kBeastSlots[11] = {"狼", "虎",   "熊",   "鸟",   "白狼", "木偶",
+                               "狗", "虎蛟", "狍鸮", "朱厌", "善翼"};
 
 // 六大类 (soldier_type 1-6):(大类名, 短名, [(子类名, 长名包含子串)...]).
 // 队长大类的 '旧重剑' 不支持召唤:工具层数据完整保留(UI 层不显示,对齐 task7 #3.3.1)。
@@ -90,19 +92,33 @@ struct QinGroup {
 };
 const std::vector<QinGroup>& QinGroups() {
     static const std::vector<QinGroup> g = {
-        {"普通兵", "秦兵",
+        {"普通兵",
+         "秦兵",
          {{"刀盾", "秦军士兵刀盾"}, {"长戈", "秦军士兵长戈"}, {"弓箭", "秦军士兵弓箭"}}},
-        {"队长", "秦兵队长",
+        {"队长",
+         "秦兵队长",
          {{"长斧", "秦军头目长斧"}, {"旧重剑", "秦军头目旧重剑"}, {"重剑", "秦军头目重剑"}}},
-        {"大将", "秦兵大将",
-         {{"A", "秦兵大将A"}, {"B", "秦兵大将B"}, {"C", "秦兵大将C"}, {"D", "秦兵大将D"},
+        {"大将",
+         "秦兵大将",
+         {{"A", "秦兵大将A"},
+          {"B", "秦兵大将B"},
+          {"C", "秦兵大将C"},
+          {"D", "秦兵大将D"},
           {"E", "秦兵大将E"}}},
         {"官员", "秦军官员", {{"官员", "秦军官员"}}},
-        {"法师", "秦军法师",
-         {{"A", "秦军法师A"}, {"B", "秦军法师B"}, {"C", "秦军法师C"}, {"D", "秦军法师D"},
+        {"法师",
+         "秦军法师",
+         {{"A", "秦军法师A"},
+          {"B", "秦军法师B"},
+          {"C", "秦军法师C"},
+          {"D", "秦军法师D"},
           {"E", "秦军法师E"}}},
-        {"大法师", "秦军大法师",
-         {{"A", "秦军大法师A"}, {"B", "秦军大法师B"}, {"C", "秦军大法师C"}, {"D", "秦军大法师D"},
+        {"大法师",
+         "秦军大法师",
+         {{"A", "秦军大法师A"},
+          {"B", "秦军大法师B"},
+          {"C", "秦军大法师C"},
+          {"D", "秦军大法师D"},
           {"E", "秦军大法师E"}}},
     };
     return g;
@@ -134,8 +150,8 @@ std::string RStr(ProcessMemory& mem, uintptr_t a, int n) {
                                        static_cast<int>(z), nullptr, 0);
         if (wn <= 0) return "?";
         std::wstring w(static_cast<size_t>(wn), L'\0');
-        ::MultiByteToWideChar(936, 0, reinterpret_cast<const char*>(b.data()),
-                              static_cast<int>(z), &w[0], wn);
+        ::MultiByteToWideChar(936, 0, reinterpret_cast<const char*>(b.data()), static_cast<int>(z),
+                              &w[0], wn);
         int un = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), wn, nullptr, 0, nullptr, nullptr);
         if (un <= 0) return "?";
         std::string out(static_cast<size_t>(un), '\0');
@@ -217,8 +233,8 @@ bool PatchBytes(ProcessMemory& mem, uintptr_t addr, const std::vector<unsigned c
             log += ": " + Hex8Bytes(old) + " -> " + Hex8Bytes(data) + "\n";
             return true;
         }
-        log += "  [!!] " + label + " 写入后校验失败: " + Hex8Bytes(nw) + " != " +
-               Hex8Bytes(data) + "\n";
+        log += "  [!!] " + label + " 写入后校验失败: " + Hex8Bytes(nw) + " != " + Hex8Bytes(data) +
+               "\n";
     } catch (const std::exception& e) {
         log += "  [!!] " + label + " 写入异常: " + e.what() + "\n";
     }
@@ -248,10 +264,13 @@ void PatchBound(ProcessMemory& mem, uintptr_t mb, int val, std::string& log) {
 // 改成基址+0x4888CC), 补丁里的立即数必须跟着变, 不能再写死旧值 0x53bb88cc。
 std::vector<unsigned char> MakeControlCmp(unsigned char imm) {
     uint32_t f = FlagAddr();
-    return {0x83, 0x3d, static_cast<unsigned char>(f & 0xFF),
+    return {0x83,
+            0x3d,
+            static_cast<unsigned char>(f & 0xFF),
             static_cast<unsigned char>((f >> 8) & 0xFF),
             static_cast<unsigned char>((f >> 16) & 0xFF),
-            static_cast<unsigned char>((f >> 24) & 0xFF), imm};
+            static_cast<unsigned char>((f >> 24) & 0xFF),
+            imm};
 }
 
 void PatchControl(ProcessMemory& mem, uintptr_t mb, int val, std::string& log) {
@@ -283,8 +302,9 @@ void PatchSkipMember(ProcessMemory& mem, uintptr_t mb, bool on, std::string& log
         PatchBytes(mem, mb + kOffControlCmp, data, "跳过 AddMember 注册(不可控)", mb, log);
     } else {
         int ctrl = GetControlVal(mem, mb);
-        PatchBytes(mem, mb + kOffControlCmp, MakeControlCmp(static_cast<unsigned char>(ctrl & 0xFF)),
-                   "恢复 AddMember 注册", mb, log);
+        PatchBytes(mem, mb + kOffControlCmp,
+                   MakeControlCmp(static_cast<unsigned char>(ctrl & 0xFF)), "恢复 AddMember 注册",
+                   mb, log);
     }
 }
 
@@ -394,8 +414,8 @@ bool RestoreQinBackup(ProcessMemory& mem) {
 uintptr_t AllocScratch(ProcessMemory& mem) {
     // 依次试固定高地址基址(低位 VirtualAllocEx 会被游戏意外访问而崩溃, python 同款
     // 6 级), 已被占用则跳过, 全占再 ANY 兜底。
-    const uintptr_t kBases[] = {0x70000000, 0x60000000, 0x50000000, 0x40000000, 0x30000000,
-                                0x20000000};
+    const uintptr_t kBases[] = {0x70000000, 0x60000000, 0x50000000,
+                                0x40000000, 0x30000000, 0x20000000};
     for (uintptr_t b : kBases) {
         try {
             if (uintptr_t a = mem.Alloc(0x4000, b)) return a;
@@ -528,8 +548,8 @@ bool SummonQinField0Tag(ProcessMemory& mem, uintptr_t mb, int group_idx, int sub
         log += std::string("  [!!] 自校验读取异常: ") + e.what() + "\n";
     }
     if (imm != 0 || s10 != tag || s0now != tag) {
-        log += "  [!!] 自校验失败 matcher=" + std::to_string(imm) + " 槽10=" + s10 + " f0=" +
-               s0now + " (期望 0/" + tag + ")";
+        log += "  [!!] 自校验失败 matcher=" + std::to_string(imm) + " 槽10=" + s10 +
+               " f0=" + s0now + " (期望 0/" + tag + ")";
         // 附原始字节,便于定位写入是否落盘
         try {
             auto b10 = mem.Read(RT(kOffNameShanYi), 8);
@@ -540,9 +560,9 @@ bool SummonQinField0Tag(ProcessMemory& mem, uintptr_t mb, int group_idx, int sub
         log += "\n";
         return false;
     }
-    log += std::string("  [秦兵·") + g.name + "/" +
-           g.subs[static_cast<size_t>(sub_idx)].name + "] rec" + std::to_string(rec) + " (" +
-           s0 + ") -> field[0]=" + tag + ", 槽10=" + tag + " ✓ 单命中必中 (匹配器保持0)\n";
+    log += std::string("  [秦兵·") + g.name + "/" + g.subs[static_cast<size_t>(sub_idx)].name +
+           "] rec" + std::to_string(rec) + " (" + s0 + ") -> field[0]=" + tag + ", 槽10=" + tag +
+           " ✓ 单命中必中 (匹配器保持0)\n";
     return true;
 }
 
@@ -574,13 +594,12 @@ bool SummonQinLongname(ProcessMemory& mem, uintptr_t mb, int group_idx, int sub_
     } catch (...) {
     }
     if (imm != 0 || s10 != long_name) {
-        log += "  [!!] 自校验失败 matcher=" + std::to_string(imm) + " 槽10=" + s10 +
-               " (期望 0/" + long_name + ")\n";
+        log += "  [!!] 自校验失败 matcher=" + std::to_string(imm) + " 槽10=" + s10 + " (期望 0/" +
+               long_name + ")\n";
         return false;
     }
-    log += std::string("  [秦兵·") + g.name + "/" +
-           g.subs[static_cast<size_t>(sub_idx)].name + "] rec" + std::to_string(rec) + " 长名=" +
-           long_name + " -> 槽10 ✓ 单命中必中\n";
+    log += std::string("  [秦兵·") + g.name + "/" + g.subs[static_cast<size_t>(sub_idx)].name +
+           "] rec" + std::to_string(rec) + " 长名=" + long_name + " -> 槽10 ✓ 单命中必中\n";
     return true;
 }
 
@@ -739,8 +758,9 @@ std::string CmdSummon(ProcessMemory& mem, uintptr_t mb, const std::vector<std::s
     } else {
         int mt = d.count("mon_type") ? ParseInt(d["mon_type"]) : 0;
         if (mt < 0 || mt > 9) {
-            log += "  --mon_type 须 0-9: 0=狼 1=虎 2=熊 3=白狼 4=木偶 5=狗 6=虎蛟 7=狍鸮 "
-                   "8=朱厌 9=善翼\n";
+            log +=
+                "  --mon_type 须 0-9: 0=狼 1=虎 2=熊 3=白狼 4=木偶 5=狗 6=虎蛟 7=狍鸮 "
+                "8=朱厌 9=善翼\n";
             return log;
         }
         RestoreQinBackup(mem);

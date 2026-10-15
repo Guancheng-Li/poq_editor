@@ -12,12 +12,12 @@ namespace poq {
 class GamCatalog {
 public:
     struct Entry {
-        std::string name;            // 物品名(拼音别名)
-        uint32_t level = 0;          // 等级
-        std::vector<uint8_t> rec;    // 完整记录字节 [len][content][cnt][echo]
+        std::string name;          // 物品名(拼音别名)
+        uint32_t level = 0;        // 等级
+        std::vector<uint8_t> rec;  // 完整记录字节 [len][content][cnt][echo]
     };
-    std::vector<std::string> cats;                   // 类别(排序)
-    std::vector<std::vector<Entry>> items;           // items[cat_idx]
+    std::vector<std::string> cats;          // 类别(排序)
+    std::vector<std::vector<Entry>> items;  // items[cat_idx]
 
     /// 从候选路径加载; 返回是否成功。
     static bool Load(const std::vector<std::string>& candidate_paths, GamCatalog& out);
@@ -29,9 +29,9 @@ public:
 class SceneCatalog {
 public:
     struct Scene {
-        std::string path;      // UTF-8 全路径
-        std::string region_py; // 区域拼音
-        std::string room_py;   // 房间拼音
+        std::string path;       // UTF-8 全路径
+        std::string region_py;  // 区域拼音
+        std::string room_py;    // 房间拼音
     };
     std::vector<Scene> scenes;
 

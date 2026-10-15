@@ -48,6 +48,14 @@ set(IMGUI_SOURCES
 
 set(PROJECT_SOURCES
     src/main.cpp
+    src/UI/UiText.cpp
+    src/UI/TabChar.cpp
+    src/UI/TabSummon.cpp
+    src/UI/TabGm.cpp
+    src/UI/TabGam.cpp
+    src/UI/TabH2.cpp
+    src/UI/Help.cpp
+    src/UI/MainWindow.cpp
     src/Core/ItemData.cpp
     src/Core/OffsetsConfig.cpp
     src/Core/Json.cpp
@@ -63,6 +71,8 @@ set(PROJECT_SOURCES
 )
 
 set(PROJECT_HEADERS
+    src/UI/App.h
+    src/UI/UiText.h
     src/Core/ItemProperty.h
     src/Core/ItemData.h
     src/Core/OffsetsConfig.h

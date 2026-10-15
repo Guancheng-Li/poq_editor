@@ -824,6 +824,23 @@ reinterpret_cast<const float*>(ptr)
 
 ## 18. main.cpp 拆分计划
 
+**已完成(2026-10-16)**:main.cpp(5017 行)按功能机械拆分(逐字节搬移、逻辑零改动),/W4 编译零告警,词条回归与拆分前逐字节一致(454/520)。
+
+拆分后的文件:
+
+- `src/UI/App.h` — App/CharWidget/OpenBackup/MessageBoxMsg 结构 + 共享全局 extern + 跨文件函数声明
+- `src/UI/UiText.h` / `src/UI/UiText.cpp` — 文本转换/备份登记/MD5/退出询问/MsgBox 队列/文件对话框/十六进制工具
+- `src/UI/TabChar.cpp` — 角色/道具逻辑与 UI(人物、道具两个主 tab)
+- `src/UI/TabSummon.cpp` — 召唤修改 tab
+- `src/UI/TabGm.cpp` — GM 命令 tab
+- `src/UI/TabGam.cpp` — GAM 存档修改 tab
+- `src/UI/TabH2.cpp` — H2 加解密 tab
+- `src/UI/Help.cpp` — 版本号/启动免责声明/消息队列/使用说明弹窗
+- `src/UI/MainWindow.cpp` — 主题/主窗口/顶部进程栏/内存查看/偏移设置
+- `src/main.cpp`(余 387 行)— 仅 WinMain/RunApp/D3D11 样板/WndProc/字体加载
+
+实际拆分目录沿用 `src/UI/`(与上面早期建议的 app/ui/platform 目录不同,但职责边界一致)。
+
 当前 `main.cpp` 已接近 5000 行，混合了：
 
 - UI 状态。

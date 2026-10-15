@@ -5,11 +5,11 @@
 
 #include "Core/Characters.h"
 
+#include <windows.h>
 #include <algorithm>
 #include <cstring>
 #include <set>
 #include <utility>
-#include <windows.h>
 
 namespace poq {
 
@@ -89,11 +89,10 @@ std::vector<uint32_t> Utf8ToCodepoints(const std::string& s) {
 // 下拉显示格式 = "职业-名字"(如 刺客-荆无忌)。
 const std::map<std::string, std::string>& KnownMembers() {
     static const std::map<std::string, std::string> kMembers = {
-        {"荆无忌", "刺客"}, {"田玥琳", "刺客"}, {"赵茜", "刺客"},
-        {"孔刚", "力士"},   {"冒顿", "力士"},   {"黥布", "力士"},
-        {"方仲", "术士"},   {"昆蒲", "术士"},   {"廖异", "术士"},   {"张良", "术士"},
-        {"淳于秋", "巫师"}, {"瑶彤", "巫师"},   {"茵珠", "巫师"},
-        {"扶苏", "游侠"},   {"韩信", "游侠"},   {"李由", "游侠"},
+        {"荆无忌", "刺客"}, {"田玥琳", "刺客"}, {"赵茜", "刺客"},   {"孔刚", "力士"},
+        {"冒顿", "力士"},   {"黥布", "力士"},   {"方仲", "术士"},   {"昆蒲", "术士"},
+        {"廖异", "术士"},   {"张良", "术士"},   {"淳于秋", "巫师"}, {"瑶彤", "巫师"},
+        {"茵珠", "巫师"},   {"扶苏", "游侠"},   {"韩信", "游侠"},   {"李由", "游侠"},
     };
     return kMembers;
 }
@@ -107,10 +106,26 @@ const std::vector<CharFieldCfg>& GlobalFields() {
 
 const std::vector<CharFieldCfg>& CharFields() {
     static const std::vector<CharFieldCfg> kFields = {
-        CharFieldCfg{"姓名", 0x00, 0, CharKind::StringPtr, {}, std::nullopt, std::nullopt, std::nullopt},
-        CharFieldCfg{"别名", 0x04, 0, CharKind::StringPtr, {}, std::nullopt, std::nullopt, std::nullopt},
-        CharFieldCfg{"职业", 0x398, 0, CharKind::Enum, {{1, "游侠"}, {2, "力士"}, {3, "刺客"}, {4, "术士"}, {5, "巫师"}}, std::nullopt, std::nullopt, std::string("谨慎修改")},
-        CharFieldCfg{"性别", 0x10, 0, CharKind::Enum, {{0, "男"}, {1, "女"}}, std::nullopt, std::nullopt, std::nullopt},
+        CharFieldCfg{
+            "姓名", 0x00, 0, CharKind::StringPtr, {}, std::nullopt, std::nullopt, std::nullopt},
+        CharFieldCfg{
+            "别名", 0x04, 0, CharKind::StringPtr, {}, std::nullopt, std::nullopt, std::nullopt},
+        CharFieldCfg{"职业",
+                     0x398,
+                     0,
+                     CharKind::Enum,
+                     {{1, "游侠"}, {2, "力士"}, {3, "刺客"}, {4, "术士"}, {5, "巫师"}},
+                     std::nullopt,
+                     std::nullopt,
+                     std::string("谨慎修改")},
+        CharFieldCfg{"性别",
+                     0x10,
+                     0,
+                     CharKind::Enum,
+                     {{0, "男"}, {1, "女"}},
+                     std::nullopt,
+                     std::nullopt,
+                     std::nullopt},
         CharFieldCfg{"等级", 0x0C, 0, CharKind::Dword, {}, 1, 99, std::nullopt},
         CharFieldCfg{"年龄", 0x14, 0, CharKind::Dword, {}, 1, 99, std::nullopt},
         // 经验/下一级 合成一对(UI 一个字段两个框, 中间斜杠; 与生命/精气同款)
@@ -139,9 +154,9 @@ const std::vector<CharFieldCfg>& CharFields() {
         CharFieldCfg{"闪避率", 0xAC, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
         CharFieldCfg{"命中率", 0xB0, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
         // 视野: +0x198, 装"视野 +X"装备时该字段 +(X)(2026-09-24 差分实测: 175 -> 200)。
-        // 注: 实测直接 WriteProcessMemory 改此字段会导致游戏崩溃(原因待查, 见 docs/260929_todo_list.md
-        // 第四节)。按用户要求**保持可编辑**(崩溃机制要靠实验定位, 不能先用只读掩盖),
-        // 因此这里 writable 仍为 true。
+        // 注: 实测直接 WriteProcessMemory 改此字段会导致游戏崩溃(原因待查, 见
+        // docs/260929_todo_list.md 第四节)。按用户要求**保持可编辑**(崩溃机制要靠实验定位,
+        // 不能先用只读掩盖), 因此这里 writable 仍为 true。
         CharFieldCfg{"视野", 0x198, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
         CharFieldCfg{"剩余属性点", 0x274, 0, CharKind::Word, {}, 0, 65535, std::nullopt},
         CharFieldCfg{"剩余技能点", 0x278, 0, CharKind::Word, {}, 0, 65535, std::nullopt},
@@ -152,15 +167,23 @@ const std::vector<CharFieldCfg>& CharFields() {
 const std::map<std::string, std::map<std::string, uint32_t>>& MemberOffsets() {
     static const std::map<std::string, std::map<std::string, uint32_t>> kOffsets = {
         // Steam 版:EasyRPG.dll
-        {"EasyRPG.dll", {
-            {"扶苏", 0x4797FC}, {"孔刚", 0x4799A4}, {"田玥琳", 0x479AE8},
-            {"张良", 0x479C14}, {"瑶彤", 0x479D68},
-        }},
+        {"EasyRPG.dll",
+         {
+             {"扶苏", 0x4797FC},
+             {"孔刚", 0x4799A4},
+             {"田玥琳", 0x479AE8},
+             {"张良", 0x479C14},
+             {"瑶彤", 0x479D68},
+         }},
         // v1.30 版:EasyRPG116.dll(CE 实测)
-        {"EasyRPG116.dll", {
-            {"扶苏", 0x37459C}, {"孔刚", 0x374744}, {"田玥琳", 0x374888},
-            {"张良", 0x3749B4}, {"瑶彤", 0x374B08},
-        }},
+        {"EasyRPG116.dll",
+         {
+             {"扶苏", 0x37459C},
+             {"孔刚", 0x374744},
+             {"田玥琳", 0x374888},
+             {"张良", 0x3749B4},
+             {"瑶彤", 0x374B08},
+         }},
     };
     return kOffsets;
 }
@@ -179,7 +202,8 @@ std::string TrimName(const std::string& s) {
 }  // namespace
 
 std::vector<std::pair<std::string, uintptr_t>> LocateByOffsets(ProcessMemory& mem, unsigned int pid,
-                                                 const std::string& module, bool strict_filter) {
+                                                               const std::string& module,
+                                                               bool strict_filter) {
     std::vector<std::pair<std::string, uintptr_t>> result;
     auto base_opt = ProcessMemory::FindModuleBase(pid, module);
     if (!base_opt) return result;
@@ -201,7 +225,7 @@ std::vector<std::pair<std::string, uintptr_t>> LocateByOffsets(ProcessMemory& me
         try {
             unsigned int edi = mem.ReadUInt32(base + off);
             if (!(edi > 0x10000 && edi < 0xFFFFFF00)) continue;
-            uintptr_t struct_base = edi + 0x28;  // 结构体 = EDI + 0x28
+            uintptr_t struct_base = edi + 0x28;             // 结构体 = EDI + 0x28
             unsigned int np = mem.ReadUInt32(struct_base);  // 姓名指针 @ +0x00
             if (!(np > 0x10000 && np < 0xFFFFFF00)) continue;
             auto s_opt = mem.ReadStringGbk(np, 40, 936);
@@ -382,8 +406,10 @@ std::optional<std::string> ValidateValue(const CharFieldCfg& f, const CharValue&
         return std::nullopt;
     }
     if (f.kind == CharKind::Pair) {
-        if (f.min && (v.lo < *f.min || v.hi < *f.min)) return f.label + ":不能小于 " + std::to_string(*f.min);
-        if (f.max && (v.lo > *f.max || v.hi > *f.max)) return f.label + ":不能大于 " + std::to_string(*f.max);
+        if (f.min && (v.lo < *f.min || v.hi < *f.min))
+            return f.label + ":不能小于 " + std::to_string(*f.min);
+        if (f.max && (v.lo > *f.max || v.hi > *f.max))
+            return f.label + ":不能大于 " + std::to_string(*f.max);
         if (v.lo > v.hi) return f.label + ":下限不能大于上限";
         return std::nullopt;
     }

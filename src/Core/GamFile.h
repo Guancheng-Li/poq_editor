@@ -1,9 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
-#include <map>
 
 namespace poq {
 
@@ -11,18 +11,18 @@ namespace poq {
 /// 文件帧: [4B len][内容][4B count=0][4B total=len+12]，内容=0x59+i 整块。
 /// 固定字段: 相对 别名尾(aend) 的偏移(内容内 dword ^0xAAABACAD, 空=-1)。
 struct GamItem {
-    size_t pos = 0;              // 记录 [len] 的文件偏移
-    uint32_t len = 0;            // 内容长度
+    size_t pos = 0;                // 记录 [len] 的文件偏移
+    uint32_t len = 0;              // 内容长度
     std::vector<uint8_t> content;  // 解码后内容(内部字段仍 ^KEY 编码)
-    size_t aend = 0;             // 别名尾偏移
-    size_t rec_end = 0;          // 记录尾(=pos+4+len+8)
-    std::string alias;           // 拼音别名
-    std::string name;            // 中文名(内容里路径字段之后的字符串, GBK)
-    size_t name_off = 0;         // 中文名字段在内容里的偏移(= 0x04 + 路径字段占用 + 4)
-    bool dirty = false;          // 已编辑(保存时重写)
-    bool is_new = false;         // 新增记录(保存时插入目标容器)
-    bool removed = false;        // 标记删除(保存时从容器剔除)
-    size_t cnt_off = 0;          // 本物品所属组的 count 字段偏移(删除时递减该组计数)
+    size_t aend = 0;               // 别名尾偏移
+    size_t rec_end = 0;            // 记录尾(=pos+4+len+8)
+    std::string alias;             // 拼音别名
+    std::string name;              // 中文名(内容里路径字段之后的字符串, GBK)
+    size_t name_off = 0;           // 中文名字段在内容里的偏移(= 0x04 + 路径字段占用 + 4)
+    bool dirty = false;            // 已编辑(保存时重写)
+    bool is_new = false;           // 新增记录(保存时插入目标容器)
+    bool removed = false;          // 标记删除(保存时从容器剔除)
+    size_t cnt_off = 0;            // 本物品所属组的 count 字段偏移(删除时递减该组计数)
 
     // ---- 树过滤缓存(P1: 过滤器每帧比对, 不再每帧 ToLower/拼串) ----
     // P3: G_Info 字段名串的偏移缓存(0=未缓存)。内容发生长度变化时由各写入口失效,
@@ -30,8 +30,8 @@ struct GamItem {
     mutable size_t ginfo_key_off_ = 0;
     void InvalidateGInfoCache() { ginfo_key_off_ = 0; }
 
-    std::string alias_low;        // alias 的小写(装载时算一次)
-    std::string disp_low;         // 显示名"中文名(别名)"的小写(装载时算一次, 无中文名时= alias_low)
+    std::string alias_low;  // alias 的小写(装载时算一次)
+    std::string disp_low;   // 显示名"中文名(别名)"的小写(装载时算一次, 无中文名时= alias_low)
 
     int32_t GetField(const char* name, bool* ok) const;
     bool SetField(const char* name, int64_t v);  // 就地改(同长度)
@@ -43,8 +43,8 @@ struct GamItem {
     bool SetName(const std::string& gbkname);
     /// 解析 G_Info 词条为结构化行(颜色组/属性名GBK/值/上限/百分比).
     struct GInfoRow {
-        char color = 0;        // 'K'蓝 'C'亮蓝(激活隐藏) 'Z'金 'H'暗蓝(未激活隐藏), 0=白
-        std::string name;      // 属性名(GBK 字节)
+        char color = 0;    // 'K'蓝 'C'亮蓝(激活隐藏) 'Z'金 'H'暗蓝(未激活隐藏), 0=白
+        std::string name;  // 属性名(GBK 字节)
         long vmin = 0;
         long vmax = 0;
         bool has_max = false;
@@ -55,8 +55,8 @@ struct GamItem {
     /// G_Info 头行("&模板编号    Lv. N" / "Lv. N"), 无则空(含尾随换行)。
     std::string GetGInfoHeader() const;
     /// 装配: 头行 + 词条行 -> G_Info 文本(GBK)。颜色组按连续同色分组 [X..]。
-    static bool BuildGInfoText(const std::string& header,
-                               const std::vector<GInfoRow>& rows, std::string& out);
+    static bool BuildGInfoText(const std::string& header, const std::vector<GInfoRow>& rows,
+                               std::string& out);
     /// 把某行词条的值改写回 G_Info(原位, 仅当新值等长, 否则失败)。
     /// idx 对应 ParseGInfoRows 的顺序; 按 "名 值[ ~ 值]" 行原位重写。
     bool SetGInfoRowValue(size_t idx, long vmin, long vmax);
@@ -78,9 +78,9 @@ struct GamItem {
         float c = 0;
     };
     std::vector<AffixNode> affixes;
-    size_t affix_tail = 0;      // 词条区总字节 = 4 + 44*N + 4; 区首 = content.size()-affix_tail
-    bool has_affixes = false;   // 数组不是必备结构; 无则不可新增词条
-    bool no_sync = false;       // true 时 SetGInfo 不重建词条数组(补长度这类"只动文本末尾"的操作用)
+    size_t affix_tail = 0;     // 词条区总字节 = 4 + 44*N + 4; 区首 = content.size()-affix_tail
+    bool has_affixes = false;  // 数组不是必备结构; 无则不可新增词条
+    bool no_sync = false;      // true 时 SetGInfo 不重建词条数组(补长度这类"只动文本末尾"的操作用)
 
     /// 解析记录末尾的词条数组。
     void ParseAffixes();
@@ -97,15 +97,15 @@ struct GamItem {
 /// 容器(场景/物体组): [len][string含场景名][count][子树...]
 struct GamContainer {
     size_t start = 0;
-    size_t end = 0;              // 下一容器起点(自身体 != end)
+    size_t end = 0;  // 下一容器起点(自身体 != end)
     std::string alias;
-    std::vector<int> item_idx;   // 归属本容器的物品下标(在 file.items 中)
+    std::vector<int> item_idx;  // 归属本容器的物品下标(在 file.items 中)
     // 插入锚点: 物品最多的组的 count 字段偏移 + 该组最后一件物品的记录尾(解析后按组统计定)
     size_t insert_cnt_off = 0;
     size_t insert_pos = 0;
     std::map<size_t, std::pair<int, size_t>> gstat;  // 组count偏移 -> (物品数, 该组末物品尾)
-    bool first = false;          // 是否当前(首个/数据区开头)容器
-    bool last = false;           // 是否末尾容器
+    bool first = false;                              // 是否当前(首个/数据区开头)容器
+    bool last = false;                               // 是否末尾容器
 };
 
 class GamFile {
@@ -114,7 +114,7 @@ public:
     std::vector<uint8_t> buf;
     uint32_t rec = 0;
     size_t dataoff = 0;
-    uint32_t cont_len = 0;       // 头 dword[2] = 首容器长度
+    uint32_t cont_len = 0;  // 头 dword[2] = 首容器长度
     std::vector<GamContainer> containers;
     std::vector<GamItem> items;
 
@@ -127,12 +127,15 @@ public:
                      std::string& err);
 
     /// 静态字节工具(供 UI 直接算值)
-    static uint32_t DwAt(const std::vector<uint8_t>& c, size_t off);   // ^KEY
+    static uint32_t DwAt(const std::vector<uint8_t>& c, size_t off);  // ^KEY
     static bool DecStr(const std::vector<uint8_t>& c, size_t off, std::string& out, size_t& used);
     static uint32_t X59Dw(const std::vector<uint8_t>& b, size_t pos, uint8_t k0 = 0x59);
 
     /// 可编辑固定字段列表 (name, 中文标签) — 供界面渲染。
-    struct FieldDesc { const char* name; const char* label; };
+    struct FieldDesc {
+        const char* name;
+        const char* label;
+    };
     static const std::vector<FieldDesc>& FieldList();
 
 private:

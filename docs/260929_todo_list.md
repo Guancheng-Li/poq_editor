@@ -155,16 +155,26 @@
 ### 3.3 GAM tab 物品树（treenode）逻辑
 **现象**：地图 → 物品树的折叠/选中联动不对（用户早前报告，遗留至今）。
 
-**状态**：未修。相关文件：`main.cpp::RenderGamTree`。
-（注：2026-09-19 已给 `regions` 加了缓存，结构改为 `App::GamRegion`/`App::GamRoom`，
-改动过程中该函数被重构过，可顺带确认现状是否更清晰。）
+**状态**：部分修复(2026-10-16)。已实现"选中物品变化后自动展开其所在房间一次"
+（此前选中折叠房间内的物品时, 物品行根本不渲染, 选中态不可见）；
+`src/UI/TabGam.cpp::RenderGamTree`。**待用户确认当初报告的具体症状是否还有残余**
+（若"联动不对"另有所指, 需要用户提供复现步骤）。
+（注：2026-09-19 已给 `regions` 加了缓存，结构改为 `App::GamRegion`/`App::GamRoom`。）
 
-### 3.4 P5 结构性重构（低优先）
+### 3.4 P5 结构性重构 —— 大头已完成(2026-10-16)
 见 `docs/260919_optimization_plan.md` 的 P5 节：
-1. `main.cpp` 4848 行单文件 → 按 tab/模块拆分
-2. 三段近似相同的"名字/别名/类型"询问框回调（导入模板 / 复制上一件 / GAM 粘贴）→ 收敛成一个 helper
-   （注：`MsgBoxAsk` 已是 `MsgBoxAskEx` 特例，可删其一）
-3. GBK↔UTF8 转换有 3 份实现（`main.cpp`、`ItemData.cpp::U8ToGbk`、tmp 工具）→ 共用一处
+1. ✅ `main.cpp` 5017 行 → 387 行(WinMain/D3D 管线), 其余拆为 `src/UI/` 10 个模块
+   (App.h/UiText/TabChar/TabSummon/TabGm/TabGam/TabH2/Help/MainWindow), 纯机械搬移,
+   /W4 零告警, 词条回归与基线一致(260929 计划 #18)
+2. ⬜ 三段近似相同的"名字/别名/类型"询问框回调（导入模板 / 复制上一件 / GAM 粘贴）→ 收敛成一个 helper
+   （注：`MsgBoxAsk` 已是 `MsgBoxAskEx` 特例, 可删其一）
+3. ⬜ GBK↔UTF8 转换仍有 2 份实现（`src/UI/UiText.cpp`、`ItemData.cpp::U8ToGbk`）→ 共用一处
+
+**同日完成的安全计划项**(详见 260929_optimization_plan.md):
+#13 关键路径 catch 改统计上报(探测路径保留静默)；
+#16 HandleGuard(快照/远程线程) + RemoteBufGuard(GM 远程缓冲, 超时 Dismiss)；
+#17 clang-format 全量落地(30 文件重排 +1488/-1038, 配置修语法错+关 SortIncludes,
+include 顺序手工还原 9 处, 回归与基线逐项一致)。
 
 ### 3.5 readme 更新（未做）
 `build\readme.txt` 仍是 8/13 那份，`gm_cmd.txt` 是 8/22 的。

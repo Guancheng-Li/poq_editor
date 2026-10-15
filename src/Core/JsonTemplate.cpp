@@ -49,7 +49,9 @@ std::string JsonValueRepr(const json::Value& v) {
     return std::string();
 }
 
-std::string ReprString(const std::string& s) { return "'" + s + "'"; }
+std::string ReprString(const std::string& s) {
+    return "'" + s + "'";
+}
 
 std::string ReadFile(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
@@ -67,14 +69,15 @@ void WriteFile(const std::string& path, const std::string& text) {
 
 }  // namespace
 
-int JsonTemplate::Clamp(const BasicFieldCfg& f, int v) { return f.Clamp(v); }
+int JsonTemplate::Clamp(const BasicFieldCfg& f, int v) {
+    return f.Clamp(v);
+}
 
 std::optional<int> JsonTemplate::ToInt(const json::Value& val, const BasicFieldCfg& f) {
     if (!f.enum_map.empty()) {
         if (val.IsNumber()) {
             double d = val.number;
-            if (d == static_cast<double>(static_cast<long long>(d)))
-                return static_cast<int>(d);
+            if (d == static_cast<double>(static_cast<long long>(d))) return static_cast<int>(d);
             return std::nullopt;
         }
         if (val.IsString()) {
@@ -161,7 +164,7 @@ TemplateLoadResult JsonTemplate::Load(const std::string& path,
         std::string label = kv.first;
         auto fit = field_map.find(label);
         if (fit == field_map.end() || fit->second->readonly) continue;  // 未知字段/只读:跳过
-        if (fit->second->type == "string_ptr") {   // 字符串字段(道具名字/道具别名)
+        if (fit->second->type == "string_ptr") {  // 字符串字段(道具名字/道具别名)
             if (kv.second.IsString() && !kv.second.string.empty())
                 result.basic_strings[fit->second->label] = kv.second.string;
             continue;
@@ -192,8 +195,10 @@ TemplateLoadResult JsonTemplate::Load(const std::string& path,
             std::string type_txt = type_v && type_v->IsString() ? type_v->string : "";
             // 激活状态可选;缺省(-1)时按颜色决定(见下方 color 解析后)
             int active_field = -1;
-            if (active_v && active_v->IsNumber()) active_field = (active_v->number != 0) ? 1 : 0;
-            else if (active_v && active_v->IsBool()) active_field = active_v->boolean ? 1 : 0;
+            if (active_v && active_v->IsNumber())
+                active_field = (active_v->number != 0) ? 1 : 0;
+            else if (active_v && active_v->IsBool())
+                active_field = active_v->boolean ? 1 : 0;
             // 属性值可选,缺省 0(对应 Python 的 item.get("属性值", 0))
             const json::Value* value_raw = item.Find("属性值");
             json::Value value_default = json::Value::MakeNumber(0);
@@ -203,22 +208,18 @@ TemplateLoadResult JsonTemplate::Load(const std::string& path,
             auto aid = ItemData::ParseAttrDisplay(name_txt);
             auto prec = ItemData::ParsePercentDisplay(type_txt);
             auto val = ParseAttrValue(value);
-            bool valid =
-                color && aid && ItemData::AttrNames().count(*aid) > 0 && prec && val;
+            bool valid = color && aid && ItemData::AttrNames().count(*aid) > 0 && prec && val;
             if (!valid) {
-                result.errors.push_back(
-                    "第 " + std::to_string(idx + 1) +
-                    " 条属性存在错误(颜色=" + ReprString(color_txt) +
-                    " 属性名=" + ReprString(name_txt) +
-                    " 类型=" + ReprString(type_txt) +
-                    " 属性值=" + JsonValueRepr(value) + "),跳过");
+                result.errors.push_back("第 " + std::to_string(idx + 1) + " 条属性存在错误(颜色=" +
+                                        ReprString(color_txt) + " 属性名=" + ReprString(name_txt) +
+                                        " 类型=" + ReprString(type_txt) +
+                                        " 属性值=" + JsonValueRepr(value) + "),跳过");
                 continue;
             }
             // 缺省激活状态:旧模板无"激活"字段时,浅蓝色(color=2)默认未激活,其它颜色默认激活
             // (flag=0 对非浅蓝词条可能被游戏当隐藏,保持 1 安全)。
-            uint32_t active = (active_field >= 0)
-                                  ? static_cast<uint32_t>(active_field)
-                                  : ((*color == 2) ? 0u : 1u);
+            uint32_t active = (active_field >= 0) ? static_cast<uint32_t>(active_field)
+                                                  : ((*color == 2) ? 0u : 1u);
             result.attrs.push_back(ItemProperty(0, *aid, static_cast<uint32_t>(*color), active,
                                                 static_cast<uint32_t>(*prec), *val));
         }
@@ -243,8 +244,7 @@ void JsonTemplate::Save(const std::string& path, const BasicState& basic_state,
         const std::string& label = f.label;
         if (f.type == "string_ptr") {
             auto it = basic_state.strs.find(label);
-            if (it != basic_state.strs.end())
-                out.Set(label, json::Value::MakeString(it->second));
+            if (it != basic_state.strs.end()) out.Set(label, json::Value::MakeString(it->second));
             continue;
         }
         auto it = basic_state.ints.find(label);
@@ -253,8 +253,7 @@ void JsonTemplate::Save(const std::string& path, const BasicState& basic_state,
             int v = it->second;
             auto eit = f.enum_map.find(v);
             if (f.enum_display_value) {
-                std::string name = eit != f.enum_map.end() ? eit->second
-                                                           : std::to_string(v);
+                std::string name = eit != f.enum_map.end() ? eit->second : std::to_string(v);
                 out.Set(label, json::Value::MakeString(std::to_string(v) + "：" + name));
             } else {
                 if (eit != f.enum_map.end())
@@ -273,7 +272,8 @@ void JsonTemplate::Save(const std::string& path, const BasicState& basic_state,
         o.Set("颜色", json::Value::MakeString(ItemData::ColorDisplay(static_cast<int>(p.color))));
         o.Set("激活", json::Value::MakeNumber(static_cast<double>(p.active ? 1 : 0)));
         o.Set("属性名", json::Value::MakeString(ItemData::AttrDisplay(p.attr_id)));
-        o.Set("类型", json::Value::MakeString(ItemData::PercentDisplay(static_cast<int>(p.precent))));
+        o.Set("类型",
+              json::Value::MakeString(ItemData::PercentDisplay(static_cast<int>(p.precent))));
         o.Set("属性值", ToJsonValue(p.value));
         attrs_arr.PushBack(std::move(o));
     }

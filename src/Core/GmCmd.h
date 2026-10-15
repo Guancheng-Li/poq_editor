@@ -21,7 +21,7 @@ enum class Method { Memory, R9 };  // 内存修改 / R9注入
 
 /// 单版本偏移表(对齐 gm_cmd.py VERSIONS[name])。
 struct GmVersion {
-    std::string mod;        // EasyRPG.dll / EasyRPG116.dll
+    std::string mod;  // EasyRPG.dll / EasyRPG116.dll
     uintptr_t player_ptr = 0;
     uintptr_t cur_ptr = 0;
     uintptr_t char1_edi = 0;

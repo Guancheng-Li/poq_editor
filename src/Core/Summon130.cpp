@@ -14,6 +14,7 @@
 
 #include "Core/Summon130.h"
 
+#include <windows.h>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -23,7 +24,6 @@
 #include <stdexcept>
 #include <tuple>
 #include <vector>
-#include <windows.h>
 
 #include "Core/Json.h"
 
@@ -54,16 +54,17 @@ struct MonMapEntry {
     bool need_slot;
 };
 const MonMapEntry kMonMap[10] = {
-    {1, "召唤兽狼", false},     {2, "召唤兽老虎", false}, {3, "召唤兽熊", false},
-    {5, "召唤兽白狼", false},   {6, "召唤兽木偶", false}, {7, "召唤兽狗", false},
-    {8, "召唤兽虎蛟", false},   {9, "召唤兽狍鸮", false},
+    {1, "召唤兽狼", false},   {2, "召唤兽老虎", false},
+    {3, "召唤兽熊", false},   {5, "召唤兽白狼", false},
+    {6, "召唤兽木偶", false}, {7, "召唤兽狗", false},
+    {8, "召唤兽虎蛟", false}, {9, "召唤兽狍鸮", false},
     {10, "召唤兽朱厌", true},  // 朱厌: 复用槽10 + 写槽10名
     {10, "召唤兽善翼", true},  // 善翼: CC10 + 写槽10名(原值)
 };
 
 // CC 槽 -> 显示名 (patch_type 提示用)  索引=CC, 槽0空
-const char* kBeastSlots[12] = {"",    "狼",   "老虎", "熊",  "鸟",   "白狼",
-                               "木偶", "狗",   "虎蛟", "狍鸮", "善翼", "朱厌"};
+const char* kBeastSlots[12] = {"",     "狼", "老虎", "熊",   "鸟",   "白狼",
+                               "木偶", "狗", "虎蛟", "狍鸮", "善翼", "朱厌"};
 
 // 六大类 (soldier_type 1-6):(大类名, 短名, [(子类名, 长名包含子串)...]).
 // 1.30 队长有 '旧重剑'(steam 无); UI 层不显示旧重剑(对齐 task7 #4 备注)。
@@ -78,19 +79,33 @@ struct QinGroup {
 };
 const std::vector<QinGroup>& QinGroups() {
     static const std::vector<QinGroup> g = {
-        {"普通兵", "秦兵",
+        {"普通兵",
+         "秦兵",
          {{"刀盾", "秦军士兵刀盾"}, {"长戈", "秦军士兵长戈"}, {"弓箭", "秦军士兵弓箭"}}},
-        {"队长", "秦兵队长",
+        {"队长",
+         "秦兵队长",
          {{"长斧", "秦军头目长斧"}, {"旧重剑", "秦军头目旧重剑"}, {"重剑", "秦军头目重剑"}}},
-        {"大将", "秦兵大将",
-         {{"A", "秦兵大将A"}, {"B", "秦兵大将B"}, {"C", "秦兵大将C"}, {"D", "秦兵大将D"},
+        {"大将",
+         "秦兵大将",
+         {{"A", "秦兵大将A"},
+          {"B", "秦兵大将B"},
+          {"C", "秦兵大将C"},
+          {"D", "秦兵大将D"},
           {"E", "秦兵大将E"}}},
         {"官员", "秦军官员", {{"官员", "秦军官员"}}},
-        {"法师", "秦军法师",
-         {{"A", "秦军法师A"}, {"B", "秦军法师B"}, {"C", "秦军法师C"}, {"D", "秦军法师D"},
+        {"法师",
+         "秦军法师",
+         {{"A", "秦军法师A"},
+          {"B", "秦军法师B"},
+          {"C", "秦军法师C"},
+          {"D", "秦军法师D"},
           {"E", "秦军法师E"}}},
-        {"大法师", "秦军大法师",
-         {{"A", "秦军大法师A"}, {"B", "秦军大法师B"}, {"C", "秦军大法师C"}, {"D", "秦军大法师D"},
+        {"大法师",
+         "秦军大法师",
+         {{"A", "秦军大法师A"},
+          {"B", "秦军大法师B"},
+          {"C", "秦军大法师C"},
+          {"D", "秦军大法师D"},
           {"E", "秦军大法师E"}}},
     };
     return g;
@@ -133,8 +148,8 @@ std::string RStr(ProcessMemory& mem, uintptr_t a, int n) {
                                        static_cast<int>(z), nullptr, 0);
         if (wn <= 0) return "?";
         std::wstring w(static_cast<size_t>(wn), L'\0');
-        ::MultiByteToWideChar(936, 0, reinterpret_cast<const char*>(b.data()),
-                              static_cast<int>(z), &w[0], wn);
+        ::MultiByteToWideChar(936, 0, reinterpret_cast<const char*>(b.data()), static_cast<int>(z),
+                              &w[0], wn);
         int un = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), wn, nullptr, 0, nullptr, nullptr);
         if (un <= 0) return "?";
         std::string out(static_cast<size_t>(un), '\0');
@@ -205,8 +220,8 @@ bool PatchBytes(ProcessMemory& mem, uintptr_t addr, const std::vector<unsigned c
             log += ": " + Hex8Bytes(old) + " -> " + Hex8Bytes(data) + "\n";
             return true;
         }
-        log += "  [!!] " + label + " 写入后校验失败: " + Hex8Bytes(nw) + " != " +
-               Hex8Bytes(data) + "\n";
+        log += "  [!!] " + label + " 写入后校验失败: " + Hex8Bytes(nw) + " != " + Hex8Bytes(data) +
+               "\n";
     } catch (const std::exception& e) {
         log += "  [!!] " + label + " 写入异常: " + e.what() + "\n";
     }
@@ -261,8 +276,8 @@ bool WriteSlot(ProcessMemory& mem, uintptr_t mb, const std::string& name, std::s
         mem.Write(addr, std::vector<unsigned char>(g.begin(), g.end()));
         std::string s = RStr(mem, addr, 12);
         bool ok = (s == name);
-        log += "  [" + std::string(ok ? "OK" : "!!") + "] 名字槽 0x" + Hex8(addr) + " (槽10) = " +
-               name + (ok ? " ✓" : "  (读回 " + s + ")") + "\n";
+        log += "  [" + std::string(ok ? "OK" : "!!") + "] 名字槽 0x" + Hex8(addr) +
+               " (槽10) = " + name + (ok ? " ✓" : "  (读回 " + s + ")") + "\n";
         return ok;
     } catch (const std::exception& e) {
         log += std::string("  [!!] 名字槽写入异常: ") + e.what() + "\n";
@@ -489,9 +504,9 @@ bool SummonQinField0Tag(ProcessMemory& mem, int group_idx, int sub_idx, std::str
         log += "  [!!] 自校验失败 槽10=" + s10 + " (期望 " + tag + ")\n";
         return false;
     }
-    log += std::string("  [秦兵·") + g.name + "/" +
-           g.subs[static_cast<size_t>(sub_idx)].name + "] rec" + std::to_string(rec) + " (" +
-           s0 + ") -> field[0]=" + tag + ", 槽10=" + tag + " ✓ 单命中必中\n";
+    log += std::string("  [秦兵·") + g.name + "/" + g.subs[static_cast<size_t>(sub_idx)].name +
+           "] rec" + std::to_string(rec) + " (" + s0 + ") -> field[0]=" + tag + ", 槽10=" + tag +
+           " ✓ 单命中必中\n";
     return true;
 }
 
@@ -519,9 +534,8 @@ bool SummonQinLongname(ProcessMemory& mem, int group_idx, int sub_idx, std::stri
         log += "  [!!] 自校验失败 槽10=" + s10 + " (期望 " + long_name + ")\n";
         return false;
     }
-    log += std::string("  [秦兵·") + g.name + "/" +
-           g.subs[static_cast<size_t>(sub_idx)].name + "] rec" + std::to_string(rec) + " 长名=" +
-           long_name + " -> 槽10 ✓ 单命中必中\n";
+    log += std::string("  [秦兵·") + g.name + "/" + g.subs[static_cast<size_t>(sub_idx)].name +
+           "] rec" + std::to_string(rec) + " 长名=" + long_name + " -> 槽10 ✓ 单命中必中\n";
     return true;
 }
 
@@ -603,8 +617,7 @@ std::string CmdSummon(ProcessMemory& mem, uintptr_t mb, const std::vector<std::s
             if (d.count("soldier_sub_type") &&
                 (sub_idx < 0 || sub_idx >= static_cast<int>(g.subs.size()))) {
                 log += "  --soldier_sub_type " + std::to_string(sub_idx) + " 非法: 大类[" +
-                       std::to_string(st) + "]=" + g.name + " 该版本子类须 " + LegalSubs(g) +
-                       "\n";
+                       std::to_string(st) + "]=" + g.name + " 该版本子类须 " + LegalSubs(g) + "\n";
                 return log;
             }
             label = std::string(g.name) + "/" + g.subs[static_cast<size_t>(sub_idx)].name;

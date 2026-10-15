@@ -1,5 +1,5 @@
 # Google C++ Style(计划 P3 #17/#19)
-# 只提供配置文件, 暂不对现有代码做批量格式化(避免污染 diff)。
+# 2026-10-16 起对 src/ 全量落地(独立 commit, 与功能修改分开)。
 # 用法: clang-format -i poqeditor_imgui/src/**.cpp
 BasedOnStyle: Google
 Standard: Auto
@@ -12,9 +12,6 @@ AlwaysBreakTemplateDeclarations: Yes
 DerivePointerAlignment: false
 PointerAlignment: Left
 IncludeBlocks: Preserve
-SortIncludes: true
+SortIncludes: false  # include 顺序有实际依赖(windows.h 必须在 tlhelp32.h 前), 不自动重排
 SpaceAfterTemplateKeyword: false
----
-Language: Cpp
-ForEachMacros: []
-  - FOR_EACH
+ForEachMacros: ['FOR_EACH']
