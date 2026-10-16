@@ -337,15 +337,10 @@ void OnCopyPrevItem(App& app) {
     if (!app.last_name.empty()) q += "\n  名字: " + app.last_name;
     if (!app.last_alias.empty()) q += "\n  别名: " + app.last_alias;
     if (app.last_type >= 0) q += "\n  类型: " + FieldValueDisplay(app, "类型", app.last_type);
-    q += "\n\n这三项(名字/别名/类型)要不要一起复制过来？词条一定复制。";
-    App* ap = &app;
-    MsgBoxAsk("复制上一件物品", q, [ap](int choice) {
-        if (choice == 2) {
-            ap->SetStatus("已取消复制上一件物品(什么都没改)。");
-            return;
-        }
-        ApplyCopyPrevItem(*ap, choice == 0);
-    });
+    AskIncludeIdent(app, "复制上一件物品", q,
+                    "这三项(名字/别名/类型)要不要一起复制过来？词条一定复制。",
+                    "已取消复制上一件物品(什么都没改)。",
+                    [&app](bool with_ident) { ApplyCopyPrevItem(app, with_ident); });
 }
 
 // 真正做"复制上一件物品": withIdent=true 连名字/别名/类型一起写。
@@ -452,15 +447,10 @@ void OnLoadTpl(App& app) {
     if (!nm.empty()) q += "\n  道具名字: " + nm;
     if (!al.empty()) q += "\n  道具别名: " + al;
     if (!ty.empty()) q += "\n  类型: " + ty;
-    q += "\n\n这三项(名字/别名/类型)要不要一起导入？词条一定导入。";
-    App* ap = &app;
-    MsgBoxAsk("导入模板", q, [ap, res](int choice) {
-        if (choice == 2) {
-            ap->SetStatus("已取消导入(什么都没改)。");
-            return;
-        }
-        ApplyLoadedTpl(*ap, res, choice == 0);
-    });
+    AskIncludeIdent(app, "导入模板", q,
+                    "这三项(名字/别名/类型)要不要一起导入？词条一定导入。",
+                    "已取消导入(什么都没改)。",
+                    [&app, res](bool with_ident) { ApplyLoadedTpl(app, res, with_ident); });
 }
 
 // 真正应用模板: withIdent=false 时不导入 类型 与 名字/别名, 其余照常。

@@ -26,6 +26,8 @@
 
 #include "UI/App.h"
 
+#include "Core/TextCodec.h"
+
 #include "Core/Characters.h"
 #include "Core/GamCatalog.h"
 #include "Core/GamFile.h"
@@ -48,26 +50,8 @@ namespace poq {
 //   词条=G_Info 字符串字段(GBK 文本); 地图=顶层容器(场景/物体组), 物品按区间归属。
 //   全部文件级, 不依赖游戏注入。
 // ============================================================================
-
-static std::string GbkToUtf8Str(const std::string& g) {
-    // 词条文本固定为 GBK(936), 不依赖系统区域(CP_ACP 在非中文系统会转乱码)
-    if (g.empty()) return "";
-    int n = ::MultiByteToWideChar(936, 0, g.data(), (int)g.size(), nullptr, 0);
-    if (n <= 0) return g;
-    std::wstring w((size_t)n, L'\0');
-    ::MultiByteToWideChar(936, 0, g.data(), (int)g.size(), &w[0], n);
-    return WideToUtf8(w);
-}
-static std::string Utf8ToGbkStr(const std::string& u) {
-    if (u.empty()) return "";
-    std::wstring w = Utf8ToWide(u);
-    if (w.empty()) return u;
-    int n = ::WideCharToMultiByte(936, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-    if (n <= 0) return u;
-    std::string g((size_t)n, '\0');
-    ::WideCharToMultiByte(936, 0, w.data(), (int)w.size(), &g[0], n, nullptr, nullptr);
-    return g;
-}
+// P5 收敛: GBK<->UTF8 唯一实现在 Core/TextCodec, 此处原有两份 static 已删。
+// GbkToUtf8Str -> poq::GbkToUtf8, Utf8ToGbkStr -> poq::Utf8ToGbk (同名调用点已改)。
 
 // 道具修改属性名(UTF-8) -> 该属性在 G_Info 里的词条名(UTF-8)。差异:
 // "普通攻击"↔"普通攻击力"; "X属性攻击"↔"X系攻击力"; "普通防御"↔"普通防御力";
@@ -137,7 +121,7 @@ static std::string GamFormatItemTip(const App& app, const std::vector<uint8_t>& 
     addf("需体质", "req_con");
     addf("攻击", "f_118");
     addf("防御", "f_11c");
-    out += "\n词条:\n" + GbkToUtf8Str(it.GetGInfo());
+    out += "\n词条:\n" + poq::GbkToUtf8(it.GetGInfo());
     return out;
 }
 
@@ -398,7 +382,7 @@ static void GamOnCopyAttr(App& app) {
         if (ok) app.gam_clip_fields[f.name] = v;
     }
     app.gam_clip_ginfo = it.GetGInfo();
-    app.gam_clip_name = GbkToUtf8Str(it.name);  // 名字(UTF-8, 供询问框显示)
+    app.gam_clip_name = poq::GbkToUtf8(it.name);  // 名字(UTF-8, 供询问框显示)
     app.gam_clip_alias = it.alias;
     app.gam_has_attrs = true;
     app.SetStatus("已复制属性：" + it.alias);
@@ -429,15 +413,10 @@ static void GamOnPasteAttr(App& app) {
         int tv = ft != app.gam_clip_fields.end() ? (int)ft->second : -1;
         q += "\n  类型: " + FieldValueDisplay(app, "类型", tv);  // 枚举显示"值：名字"
     }
-    q += "\n\n这三项(名字/别名/类型)要不要一起粘贴？其余属性按所选方式粘贴。";
-    App* ap = &app;
-    MsgBoxAsk("粘贴属性", q, [ap, idx](int choice) {
-        if (choice == 2) {
-            ap->SetStatus("已取消粘贴属性(什么都没改)。");
-            return;
-        }
-        ApplyGamPasteAttr(*ap, idx, choice == 0);
-    });
+    AskIncludeIdent(app, "粘贴属性", q,
+                    "这三项(名字/别名/类型)要不要一起粘贴？其余属性按所选方式粘贴。",
+                    "已取消粘贴属性(什么都没改)。",
+                    [&app, idx](bool with_ident) { ApplyGamPasteAttr(app, idx, with_ident); });
 }
 
 // 真正做粘贴: withIdent=true 连名字/别名/类型一起; false 只粘贴其余属性。
@@ -451,7 +430,7 @@ static void ApplyGamPasteAttr(App& app, int idx, bool withIdent) {
     }
     if (!app.gam_clip_ginfo.empty()) ginfo_ok = it.SetGInfo(app.gam_clip_ginfo);
     if (withIdent) {
-        if (!app.gam_clip_name.empty()) it.SetName(Utf8ToGbkStr(app.gam_clip_name));
+        if (!app.gam_clip_name.empty()) it.SetName(poq::Utf8ToGbk(app.gam_clip_name));
         if (!app.gam_clip_alias.empty()) it.SetAlias(app.gam_clip_alias);
     }
     app.gam_edit_loaded_item = -1;  // 刷新界面
@@ -770,7 +749,7 @@ static void RenderGamEdit(App& app) {
         GamLoadGInfoRows(app, it);
         std::snprintf(app.gam_alias_buf, sizeof(app.gam_alias_buf), "%s", it.alias.c_str());
         std::snprintf(app.gam_name_buf, sizeof(app.gam_name_buf), "%s",
-                      GbkToUtf8Str(it.name).c_str());
+                      poq::GbkToUtf8(it.name).c_str());
         app.gam_edit_loaded_item = app.gam_sel_item;
     }
     // 名称(标签放输入框左边)
@@ -780,9 +759,9 @@ static void RenderGamEdit(App& app) {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(240.0f);
     if (ImGui::InputText("##gamname", app.gam_name_buf, sizeof(app.gam_name_buf))) {
-        if (!it.SetName(Utf8ToGbkStr(app.gam_name_buf)))  // 非法则还原
+        if (!it.SetName(poq::Utf8ToGbk(app.gam_name_buf)))  // 非法则还原
             std::snprintf(app.gam_name_buf, sizeof(app.gam_name_buf), "%s",
-                          GbkToUtf8Str(it.name).c_str());
+                          poq::GbkToUtf8(it.name).c_str());
     }
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
@@ -881,7 +860,7 @@ static void RenderGamEdit(App& app) {
                     app.gam_grow_sel[(size_t)i] = bsel ? 1 : 0;
             }
             if (ImGui::TableSetColumnIndex(1)) {
-                std::string name_u = GbkToUtf8Str(r.name);
+                std::string name_u = poq::GbkToUtf8(r.name);
                 int cur = -1;
                 for (size_t k = 0; k < s_bare.size(); ++k)
                     if (AttrGInfoAliasU8(s_bare[k]) == name_u) {
@@ -903,7 +882,7 @@ static void RenderGamEdit(App& app) {
                     int si = cur - base;
                     if (si >= 0 && si < (int)s_bare.size())
                         // 写 G_Info 名字(如 普通攻击力), 不是道具修改的名字(普通攻击)
-                        r.name = Utf8ToGbkStr(AttrGInfoAliasU8(s_bare[(size_t)si]));
+                        r.name = poq::Utf8ToGbk(AttrGInfoAliasU8(s_bare[(size_t)si]));
                 }
             }
             if (ImGui::TableSetColumnIndex(2)) {
@@ -936,7 +915,7 @@ static void RenderGamEdit(App& app) {
         r.color = 0;
         auto lst = ItemData::AttrDisplayList();  // 默认取第一个属性名(写 G_Info 名字形式, GBK)
         r.name =
-            lst.empty() ? std::string() : Utf8ToGbkStr(AttrGInfoAliasU8(AttrBareNameU8(lst[0])));
+            lst.empty() ? std::string() : poq::Utf8ToGbk(AttrGInfoAliasU8(AttrBareNameU8(lst[0])));
         r.vmin = 0;
         r.has_max = false;
         r.is_percent = false;

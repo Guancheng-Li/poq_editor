@@ -27,6 +27,8 @@
 
 #include "Core/Json.h"
 
+#include "Core/TextCodec.h"
+
 namespace poq {
 namespace summon_130 {
 
@@ -160,19 +162,6 @@ std::string RStr(ProcessMemory& mem, uintptr_t a, int n) {
     }
 }
 
-// UTF-8 -> CP936(GBK) 字节,失败返回空串。
-std::string Utf8ToGbk(const std::string& s) {
-    if (s.empty()) return "";
-    int wn = ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    if (wn <= 0) return "";
-    std::wstring w(static_cast<size_t>(wn), L'\0');
-    ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), &w[0], wn);
-    int bn = ::WideCharToMultiByte(936, 0, w.data(), wn, nullptr, 0, nullptr, nullptr);
-    if (bn <= 0) return "";
-    std::string out(static_cast<size_t>(bn), '\0');
-    ::WideCharToMultiByte(936, 0, w.data(), wn, &out[0], bn, nullptr, nullptr);
-    return out;
-}
 
 std::vector<unsigned char> GbkBytes(const std::string& s) {
     std::string g = Utf8ToGbk(s);

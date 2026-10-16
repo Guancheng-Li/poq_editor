@@ -273,6 +273,21 @@ void MsgBoxAskEx(const std::string& title, const std::string& text, const char* 
     g_msgbox_queue.push_back(std::move(m));
 }
 
+// P5 收敛: 三处"名字/别名/类型要不要一起"询问框的公共管线(见 UiText.h)。
+void AskIncludeIdent(App& app, const char* title, const std::string& body, const char* tail,
+                     const char* cancel_msg,
+                     const std::function<void(bool with_ident)>& on_choice) {
+    std::string q = body + "\n\n" + tail;
+    App* ap = &app;
+    MsgBoxAsk(title, q, [ap, cancel_msg, on_choice](int choice) {
+        if (choice == 2) {
+            ap->SetStatus(cancel_msg);
+            return;
+        }
+        on_choice(choice == 0);
+    });
+}
+
 std::string OpenFileDialog(const std::wstring& dir, const wchar_t* filter) {
     wchar_t buf[1024]{};
     OPENFILENAMEW ofn{};

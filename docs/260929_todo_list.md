@@ -169,9 +169,9 @@
 1. ✅ `main.cpp` 5017 行 → 387 行(WinMain/D3D 管线), 其余拆为 `src/UI/` 10 个模块
    (App.h/UiText/TabChar/TabSummon/TabGm/TabGam/TabH2/Help/MainWindow), 纯机械搬移,
    /W4 零告警, 词条回归与基线一致(260929 计划 #18)
-2. ⬜ 三段近似相同的"名字/别名/类型"询问框回调（导入模板 / 复制上一件 / GAM 粘贴）→ 收敛成一个 helper
-   （注：`MsgBoxAsk` 已是 `MsgBoxAskEx` 特例, 可删其一）
-3. ⬜ GBK↔UTF8 转换仍有 2 份实现（`src/UI/UiText.cpp`、`ItemData.cpp::U8ToGbk`）→ 共用一处
+2. ✅ 三段"名字/别名/类型"询问框回调 → 已收敛为 `UiText::AskIncludeIdent`(2026-10-17, 真机验证一致);
+   `MsgBoxAsk`/`MsgBoxAskEx` **保留双函数**——强并会改按钮默认文案或三处显式传参增噪, 维持现状是更优解
+3. ✅ GBK↔UTF8 转换 4 份实现 → 已合一为 `src/Core/TextCodec.{h,cpp}`(ItemData/SummonSteam/Summon130/TabGam 全部改调)
 
 **同日完成的安全计划项**(详见 260929_optimization_plan.md):
 #13 关键路径 catch 改统计上报(探测路径保留静默)；

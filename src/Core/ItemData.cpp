@@ -1,5 +1,7 @@
 #include "Core/ItemData.h"
 
+#include "Core/TextCodec.h"
+
 #include <windows.h>
 
 #include <cctype>
@@ -238,24 +240,11 @@ std::string AttrGInfoName(const std::string& n) {
     return n;
 }
 
-namespace {
-std::string U8ToGbk(const std::string& u8) {
-    if (u8.empty()) return "";
-    int n = ::MultiByteToWideChar(CP_UTF8, 0, u8.data(), (int)u8.size(), nullptr, 0);
-    if (n <= 0) return u8;
-    std::wstring w((size_t)n, L'\0');
-    ::MultiByteToWideChar(CP_UTF8, 0, u8.data(), (int)u8.size(), &w[0], n);
-    int m = ::WideCharToMultiByte(936, 0, w.data(), n, nullptr, 0, nullptr, nullptr);
-    std::string s((size_t)m, '\0');
-    ::WideCharToMultiByte(936, 0, w.data(), n, &s[0], m, nullptr, nullptr);
-    return s;
-}
-}  // namespace
 
 int AttrIdFromGInfoName(const std::string& gbk) {
     static const std::map<std::string, int> kMap = [] {
         std::map<std::string, int> m;
-        for (const auto& kv : AttrNames()) m[U8ToGbk(AttrGInfoName(kv.second))] = (int)kv.first;
+        for (const auto& kv : AttrNames()) m[Utf8ToGbk(AttrGInfoName(kv.second))] = (int)kv.first;
         return m;
     }();
     auto it = kMap.find(gbk);

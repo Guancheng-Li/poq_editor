@@ -57,6 +57,7 @@ set(PROJECT_SOURCES
     src/UI/Help.cpp
     src/UI/MainWindow.cpp
     src/Core/ItemData.cpp
+  src/Core/TextCodec.cpp
     src/Core/OffsetsConfig.cpp
     src/Core/Json.cpp
     src/Core/JsonTemplate.cpp
@@ -75,6 +76,7 @@ set(PROJECT_HEADERS
     src/UI/UiText.h
     src/Core/ItemProperty.h
     src/Core/ItemData.h
+  src/Core/TextCodec.h
     src/Core/OffsetsConfig.h
     src/Core/Json.h
     src/Core/JsonTemplate.h

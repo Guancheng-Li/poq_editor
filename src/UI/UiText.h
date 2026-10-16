@@ -41,6 +41,16 @@ void MsgBoxAsk(const std::string& title, const std::string& text, std::function<
 void MsgBoxAskEx(const std::string& title, const std::string& text, const char* b0, const char* b1,
                  const char* b2, std::function<void(int)> on);
 
+struct App;  // 前置声明(App.h 依赖本头, 不能反向 include)
+
+// P5 收敛: 三处"名字/别名/类型要不要一起"询问框(复制上一件/导入模板/GAM 粘贴)
+// 的公共管线。body = 调用方拼好的来源描述("来源物品:"+"  名字: x"… 各处文案不同);
+// tail = 询问尾句。按钮2=取消: 记 cancel_msg 到状态栏, 什么都不做;
+// 按钮0=一起(with_ident=true), 按钮1=只属性, 结果回给 on_choice。
+void AskIncludeIdent(App& app, const char* title, const std::string& body, const char* tail,
+                     const char* cancel_msg,
+                     const std::function<void(bool with_ident)>& on_choice);
+
 std::string OpenFileDialog(const std::wstring& dir, const wchar_t* filter);
 std::string SaveFileDialog(const std::wstring& dir, const wchar_t* filter);
 
