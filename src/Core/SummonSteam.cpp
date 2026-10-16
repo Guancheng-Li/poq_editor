@@ -377,6 +377,31 @@ bool RestoreQinBackup(ProcessMemory& mem) {
         uintptr_t scratch = 0;
         if (const json::Value* s = root.Find("scratch"))
             if (s->IsNumber()) scratch = static_cast<uintptr_t>(s->number);
+        // 加固(2026-10-16 召唤卡死排查): 备份可能跨游戏会话残留 —— 新会话里类型表
+        // 是全新的(field[0] 本来就是原值), 此时还原无害, 但**释放旧 scratch 地址极
+        // 危险**: 那块内存可能已被别的东西占用, VirtualFreeEx 掉它 = 破坏游戏内存。
+        // 判据: 仅当 field 值仍指向旧 scratch 区间 [scratch, scratch+0x4000)(重定向
+        // 还在)才允许释放; 否则跳过释放(宁可泄漏 16KB 的死地址, 不冒释放别人的险)。
+        bool redirect_active = false;
+        if (scratch) {
+            for (const auto& kv : recs->object) {
+                double off = 4;
+                if (kv.second.IsObject()) {
+                    if (const json::Value* x = kv.second.Find("off")) off = x->number;
+                }
+                int rec = std::atoi(kv.first.c_str());
+                try {
+                    uint32_t cur = mem.ReadUInt32(
+                        RT(kOffQinTable) + 8 + static_cast<uintptr_t>(rec) * kQinStride +
+                        static_cast<uintptr_t>(off));
+                    if (cur >= scratch && cur < scratch + 0x4000) {
+                        redirect_active = true;
+                        break;
+                    }
+                } catch (...) {
+                }
+            }
+        }
         int n = 0;
         for (const auto& kv : recs->object) {
             double off = 4, v = 0;
@@ -395,7 +420,7 @@ bool RestoreQinBackup(ProcessMemory& mem) {
             } catch (...) {
             }
         }
-        if (scratch) {
+        if (scratch && redirect_active) {
             try {
                 mem.Free(scratch);
             } catch (...) {
@@ -413,7 +438,9 @@ bool RestoreQinBackup(ProcessMemory& mem) {
 // ---------------------------------------------------------------------------
 uintptr_t AllocScratch(ProcessMemory& mem) {
     // 依次试固定高地址基址(低位 VirtualAllocEx 会被游戏意外访问而崩溃, python 同款
-    // 6 级), 已被占用则跳过, 全占再 ANY 兜底。
+    // 6 级), 已被占用则跳过。
+    // 加固(2026-10-16 召唤卡死排查): **不再 ANY 兜底** —— ASLR 下六级全占是真实
+    // 可能的, 落到低地址 = 崩游戏。全占时抛错放弃本次召唤, 由 UI 提示用户。
     const uintptr_t kBases[] = {0x70000000, 0x60000000, 0x50000000,
                                 0x40000000, 0x30000000, 0x20000000};
     for (uintptr_t b : kBases) {
@@ -422,7 +449,9 @@ uintptr_t AllocScratch(ProcessMemory& mem) {
         } catch (...) {
         }
     }
-    return mem.Alloc(0x4000);
+    throw std::runtime_error(
+        "秦兵 scratch 分配失败: 0x20000000~0x70000000 六级高地址全部被占用。"
+        "为避免崩溃已放弃本次召唤(不落低地址), 请重启游戏后再试。");
 }
 
 class QinScratch {
