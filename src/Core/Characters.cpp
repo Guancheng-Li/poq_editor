@@ -414,7 +414,9 @@ std::optional<std::string> ValidateValue(const CharFieldCfg& f, const CharValue&
             return f.label + ":不能小于 " + std::to_string(*f.min);
         if (f.max && (v.lo > *f.max || v.hi > *f.max))
             return f.label + ":不能大于 " + std::to_string(*f.max);
-        if (v.lo > v.hi) return f.label + ":下限不能大于上限";
+        // 经验的 lo/hi 是"当前经验/下一级经验", 当前>下一级是合法改法(2026-10-17 用户
+        // 要求去掉该校验); 其余成对字段(攻击/防御 min/max)保留此校验。
+        if (v.lo > v.hi && f.label != "经验") return f.label + ":下限不能大于上限";
         return std::nullopt;
     }
     // dword / word
