@@ -154,10 +154,14 @@ const std::vector<CharFieldCfg>& CharFields() {
         CharFieldCfg{"闪避率", 0xAC, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
         CharFieldCfg{"命中率", 0xB0, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
         // 视野: +0x198, 装"视野 +X"装备时该字段 +(X)(2026-09-24 差分实测: 175 -> 200)。
-        // 注: 实测直接 WriteProcessMemory 改此字段会导致游戏崩溃(原因待查, 见
-        // docs/260929_todo_list.md 第四节)。按用户要求**保持可编辑**(崩溃机制要靠实验定位,
-        // 不能先用只读掩盖), 因此这里 writable 仍为 true。
+        // 2026-10-17 E1/E2/E3 实验结案: 直接写**任意值都安全**, 游戏只在换图/进图时
+        // 读取派生迷雾(运行中不实时消费); 当初"写视野崩游戏"系当时保存路径其它字段
+        // 的写入缺陷(已由 260929 加固修复), 本字段洗清嫌疑。
         CharFieldCfg{"视野", 0x198, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
+        // 移动速度: +0x190, 穿/脱"移动速度 +X"装备时该字段 ±(X)(2026-10-17 差分实测:
+        // 穿 100 词条布衣 0 -> 100, 脱下回落; 预测的 +0xBC 不对)。与视野同款行为:
+        // 直接写安全, 换图/切场景时读取生效(写 300 切图后明显变快, 实测)。
+        CharFieldCfg{"移动速度", 0x190, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
         CharFieldCfg{"剩余属性点", 0x274, 0, CharKind::Word, {}, 0, 65535, std::nullopt},
         CharFieldCfg{"剩余技能点", 0x278, 0, CharKind::Word, {}, 0, 65535, std::nullopt},
     };
