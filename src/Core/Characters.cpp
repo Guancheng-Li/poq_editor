@@ -160,8 +160,9 @@ const std::vector<CharFieldCfg>& CharFields() {
         CharFieldCfg{"视野（迷雾去除）", 0x198, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
         // 移动速度: +0x190, 穿/脱"移动速度 +X"装备时该字段 ±(X)(2026-10-17 差分实测:
         // 穿 100 词条布衣 0 -> 100, 脱下回落; 预测的 +0xBC 不对)。与视野同款行为:
-        // 直接写安全, 换图/切场景时读取生效(写 300 切图后明显变快, 实测)。
-        CharFieldCfg{"移动速度", 0x190, 0, CharKind::Dword, {}, 0, 99999, std::nullopt},
+        // 直接写安全, 换图/切场景时读取生效。**有效范围有限**: 100/300/500 实测变快,
+        // 3000 实测反而变慢(移动计算对超大值溢出/饱和), 上限设 999。
+        CharFieldCfg{"移动速度", 0x190, 0, CharKind::Dword, {}, 0, 999, std::nullopt},
         CharFieldCfg{"剩余属性点", 0x274, 0, CharKind::Word, {}, 0, 65535, std::nullopt},
         CharFieldCfg{"剩余技能点", 0x278, 0, CharKind::Word, {}, 0, 65535, std::nullopt},
     };
