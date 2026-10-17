@@ -795,6 +795,7 @@ void OnCharSave(App& app) {
                         std::to_string(failed.size()) + " 个。\n失败字段:";
         for (const auto& f : failed) m += " " + f;
         m += tail_msg;
+        m += "，移动速度和视野需要切换场景（进入任意房间）后生效";
         app.char_status = "保存部分失败:" + name;
         app.SetStatus("保存部分失败:" + name + "。");
         MsgBox("保存完成(部分失败)", m, MB_ICONWARNING);
@@ -804,7 +805,8 @@ void OnCharSave(App& app) {
         "保存完成:" + name + " " + std::to_string(saved) + " 个字段已写入。请在游戏中验证。";
     app.SetStatus("角色属性保存完成:" + name + "。");
     MsgBox("保存完成",
-           "请存档后重新读档查看变化，部分属性词条可能因道具属性加成与设定值不同" + tail_msg,
+           "请存档后重新读档查看变化，部分属性词条可能因道具属性加成与设定值不同" + tail_msg +
+               "，移动速度和视野需要切换场景（进入任意房间）后生效",
            MB_ICONINFORMATION);
 }
 
@@ -1334,8 +1336,7 @@ void RenderCharTab(App& app) {
     ImGui::Separator();
 
     // ---- 字段网格(task6 指定排列:3 列行 + 2 列行)----
-    // 每格 = {字段名, 宽度权重}。权重用于让"经验"占两格宽(它是成对字段、渲染成两个输入框),
-    // 于是该行四个输入框(经验 lo/hi + 声望 + 视野)等宽。
+    // 每格 = {字段名, 宽度权重}。权重用于让"经验"占两格宽(它是成对字段、渲染成两个输入框)。
     struct CharCol {
         const char* label;
         int w;
@@ -1343,7 +1344,8 @@ void RenderCharTab(App& app) {
     static const CharCol kLayout[][3] = {
         {{"姓名", 1}, {"别名", 1}, {"职业", 1}},
         {{"年龄", 1}, {"性别", 1}, {"等级", 1}},
-        {{"经验", 2}, {"声望", 1}, {"视野", 1}},
+        {{"移动速度", 1}, {"视野（迷雾去除）", 1}, {nullptr, 0}},  // 2026-10-17 新增: 独立行
+        {{"经验", 2}, {"声望", 1}, {nullptr, 0}},
         {{"生命", 1}, {"精气", 1}, {nullptr, 0}},
         {{"力量", 1}, {"体质", 1}, {nullptr, 0}},
         {{"敏捷", 1}, {"悟性", 1}, {nullptr, 0}},
