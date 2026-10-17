@@ -1439,6 +1439,9 @@ void RenderCharTab(App& app) {
             ImGui::EndTable();
         }
     }
+    // 2026-10-17 E1/E2/E3 实测: 写 +0x198 本身安全(任意值), 但游戏只在换图/进图时
+    // 读取派生迷雾 —— 提示用户生效时机, 免得以为没生效反复改。
+    ImGui::TextDisabled("视野改写换图/读档后生效。");
     ImGui::EndChild();
 }
 
