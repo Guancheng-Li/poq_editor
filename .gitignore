@@ -1,0 +1,39 @@
+# Build outputs and IDE state
+/build/
+/build-*/
+/out/
+/cmake-build-*/
+/.vs/
+/.vscode/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/compile_commands.json
+
+# Compiled, packaged, and runtime artifacts
+*.obj
+*.o
+*.pdb
+*.idb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.exp
+*.zip
+*.7z
+*.msi
+*.log
+imgui.ini
+
+# Local-only configuration and test data
+affix_rt.local.bat
+*.local
+/data/
+/docs/
+/build.bat
+/build_msbuild_only.bat
+/pack_only.bat
+/affix_rt.local.example.bat
+/gm_cmd.txt
+/readme.txt

@@ -1,0 +1,20 @@
+# 260929 计划 P3 #19.3 —— 低噪声规则集, 勿一次全开.
+# 与 docs/abseil_totw.md 对照 (Abseil TotW / Google 可读性, 不依赖 Abseil 库).
+# 用法(可选): clang-tidy -p build src/UI/CharacterTabLogic.cpp
+---
+Checks: >-
+  -*,
+  bugprone-use-after-move,
+  bugprone-dangling-handle,
+  modernize-use-nullptr,
+  modernize-use-override,
+  readability-implicit-bool-conversion,
+  readability-braces-around-statements,
+  readability-redundant-casting,
+  readability-container-size-empty,
+  google-readability-casting,
+  google-explicit-constructor,
+  cppcoreguidelines-pro-type-member-init
+WarningsAsErrors: ''
+HeaderFilterRegex: 'poqeditor_imgui/src/.*'
+FormatStyle: file

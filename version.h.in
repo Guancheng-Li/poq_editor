@@ -1,0 +1,10 @@
+#pragma once
+// 生成文件(勿手改): version.h.in -> ${CMAKE_CURRENT_BINARY_DIR}/generated/Version.h
+//
+// 版本号规则(全项目唯一来源):
+//   - 后缀 N = POQ_VER_BUILD, 只在 CMakeLists.txt 里改这一处;
+//   - 启动弹窗 "Ver: YYMMDDvN" 的日期部分用**编译期 __DATE__**(每次编译自动取当天);
+//   - PE 资源(FileVersion/ProductVersion)用 CMake **配置日**的 YYMMDD + 同一个 N,
+//     所以"资源管理器属性"与"关于弹窗"的日期在跨天重编时可能差一天(版本后缀始终一致)。
+#define POQ_VER_BUILD @POQ_VER_BUILD@
+#define POQ_VERSION_STRING "@POQ_VER_STRING@"

@@ -1,0 +1,30 @@
+#include <winver.h>
+
+// 与 Help.cpp 启动弹窗 Ver: YYMMDDv2 对齐(后缀 2 = POQ_VER_BUILD, CMake 配置时写入)
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION @POQ_VER_Y@,@POQ_VER_M@,@POQ_VER_D@,@POQ_VER_BUILD@
+PRODUCTVERSION @POQ_VER_Y@,@POQ_VER_M@,@POQ_VER_D@,@POQ_VER_BUILD@
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS__WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "PoqEditor"
+            VALUE "FileDescription", "PoqEditor (POQ editor)"
+            VALUE "FileVersion", "@POQ_VER_STRING@"
+            VALUE "InternalName", "PoqEditor"
+            VALUE "OriginalFilename", "PoqEditor.exe"
+            VALUE "ProductName", "PoqEditor"
+            VALUE "ProductVersion", "@POQ_VER_STRING@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

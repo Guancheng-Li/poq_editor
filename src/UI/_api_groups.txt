@@ -1,0 +1,23 @@
+// Dev index only — canonical declarations live in Api*.h (snake_case).
+
+// ---- ApiChar.h: TabChar / Item / Character ----
+try_get_selected_pid, find_poq_pid, on_init, on_raw_read, on_raw_write, on_save_cfg, field_value_display
+on_read, tick_item_read, on_save, on_copy_prev_item, on_load_tpl, on_save_as
+is_char_field_editable, find_char_field, rebuild_char_widgets, on_char_read, on_char_save
+on_money_apply, on_invincible_toggled, on_kill_toggled, tick_lock
+render_basic_fields, render_attr_table, render_char_tab
+
+// ---- ApiSummon.h ----
+render_summon_tab
+
+// ---- ApiGm.h ----
+load_gm_cmd_list, tick_gm, render_gm_tab
+
+// ---- ApiGam.h ----
+timestamped_bak_path, gam_load_prefs, render_gam_tab
+
+// ---- ApiH2.h ----
+render_h2_tab
+
+// ---- ApiMain.h ----
+apply_blue_theme, render_main_window, render_welcome_dialog, render_msg_queue, render_help_popup

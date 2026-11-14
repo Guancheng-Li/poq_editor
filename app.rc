@@ -1,0 +1,13 @@
+// Embed the requireAdministrator manifest so the executable requests elevation
+// on launch (OpenProcess with PROCESS_ALL_ACCESS requires admin rights).
+//
+// Resource statement: <ID> <TYPE> <filename>
+//   ID 1  = CREATEPROCESS_MANIFEST_RESOURCE_ID (the manifest slot for an exe)
+//   TYPE 24 = RT_MANIFEST
+// Using raw numbers keeps the .rc independent of windows.h / RC preprocessor
+// quirks.
+1 24 "app.manifest"
+
+// Embed the application icon so the exe shows it in Explorer / taskbar
+// (the in-app window icon is loaded from resources.qrc at runtime).
+1 ICON "poq_multi_3sizes.ico"
